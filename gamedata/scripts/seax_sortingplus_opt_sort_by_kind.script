@@ -35,6 +35,12 @@
 local DBG = false -- diagnostics, greppable as "FIXHD|" in the xray log
 if DBG then printf("FIXHD| seax_sortingplus_opt_sort_by_kind override loaded") end
 
+-- Warn (once) when SortingPlus is installed but its locals aren't unlocalized:
+-- the empty-table fallbacks below then silently drop favourite/kind ordering,
+-- which players report as "random" sorting. Normally an unlocalizers config
+-- (shipped by mod 464 and, since v0.2.1, by this mod too) exposes them.
+local warned_no_unlocals = false
+
 -- upvalue caches for the comparator hot loop
 local type = type
 local math_ceil = math.ceil
@@ -70,6 +76,13 @@ end
 function sort_by_kind_factory(t)
     -- Resolve SortingPlus state per factory call in case it is reloaded (MCM etc.).
     local sp = zzz_rax_sortingplus_mcm
+    if sp and not sp.item_order and not warned_no_unlocals then
+        warned_no_unlocals = true
+        printf("! FIXHD| SortingPlus locals (item_order/favorite_itms/junk_itms) are not " ..
+            "unlocalized - favourite/kind sorting degrades to size order. An " ..
+            "unlocalizers config for [zzz_rax_sortingplus_mcm] did not load; check " ..
+            "the log for 'creating unlocalizer for script zzz_rax_sortingplus_mcm'.")
+    end
     local SORTFAVS = sp and sp.SORTFAVS
     local SORTJUNK = sp and sp.SORTJUNK
     -- These are locals inside SortingPlus, only visible when the modded exes'

@@ -65,6 +65,7 @@ Each fix disables itself if its mod isn't installed.
 | `gamedata/scripts/zzz_aaa_hd_icon_mark_pos_fix.script` | Standalone. Wraps SortingPlus' `icon_junk`/`icon_favs` at `on_game_start` to correct mark positions. Named `zzz_aaa_*` so it wraps before SortingPlus registers the functors. |
 | `gamedata/scripts/zzz_aaa_hd_attachment_layer_fix.script` | Standalone. Replaces `UICellItem:Create_Layer` at `on_game_start` to redirect attachment overlays to the HD pack's gun-mounted `_x` icons. |
 | `gamedata/scripts/zzzz_loot_searching.script` | Patched copy of Looting Takes Time REDUX's script (must win over that mod in MO2). Only `get_sort_info` changed, to scale-correct the precomputed corpse grid. |
+| `gamedata/configs/unlocalizers/unlocalizer_fix_hd_icon_pos.ltx` | Exposes SortingPlus' local `favorite_itms`/`junk_itms`/`item_order` to our sort factory. Identical to (and safely additive with) the config mod 464 ships; needed because Inventory Antifreeze activates our `seax_*` script by filename even when 464 itself is disabled. |
 
 ## Install
 
@@ -94,3 +95,12 @@ All cross-mod references are guarded. If SortingPlus, the lag reducer, the HD
 framework, `magazine_binder`, or the exe-side unlocalizer (which exposes
 SortingPlus' local `favorite_itms`/`junk_itms`/`item_order`) are missing, the
 scripts no-op or degrade to a plain size/alphabetical sort instead of erroring.
+
+One degradation bit users for real: Inventory Antifreeze soft-detects
+`seax_sortingplus_opt_sort_by_kind` by filename, so shipping that script makes
+468 route sorting through it even when 464 is disabled — and without 464 no
+unlocalizers config loaded, so the guarded fallbacks silently dropped
+favourite/kind ordering ("inventory sorts randomly"). This mod now ships its
+own copy of the unlocalizers config so sorting works with or without 464, and
+the sort factory logs a one-time `! FIXHD|` warning if the SortingPlus locals
+are still unreachable.
