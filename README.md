@@ -9,6 +9,9 @@ being drawn or placed wrong in the inventory:
 - **468- Inventory Antifreeze** — no more sort errors on items added to big
   inventories mid-sort
 - **Looting Takes Time REDUX** — corpse loot grids pack tightly, no cell-wide gaps
+- **HD Attachment Icons For GAMMA** — scoped weapon variants the pack doesn't
+  cover now draw its straight gun-mounted scope icons instead of the diagonal
+  inventory item icon
 
 Each fix disables itself if its mod isn't installed.
 
@@ -44,12 +47,23 @@ Each fix disables itself if its mod isn't installed.
    open. This mod ships a patched copy of `zzzz_loot_searching.script` whose
    `get_sort_info` returns rendered cell sizes; nothing else in it changed.
 
+5. Attachment overlays on weapon icons: HD Attachment Icons For GAMMA ships
+   straight gun-mounted scope icons as `<scope>_x` sections and rewires the
+   weapon variants it covers to use them. Uncovered variants (e.g. the Obrez
+   with a PU scope) still drew the scope's inventory item icon, which the HD
+   pack draws at an angle, so the overlay looked rotated and misaligned.
+   `Create_Layer` is replaced with a version that redirects a layer section
+   to its `_x` variant when one exists (also stripping the vanilla
+   `wpn_addon_scope_` prefix), shifting coords so the visual center stays
+   put. Rotation-fix math and `inv_grid_scale` handling are preserved.
+
 ## Files
 
 | File | Role |
 |------|------|
 | `gamedata/scripts/seax_sortingplus_opt_sort_by_kind.script` | Overrides the copy from mod 464. Scale/override-aware footprints, SortingPlus cache priming, lazy caches, nil-guarded comparator. |
 | `gamedata/scripts/zzz_aaa_hd_icon_mark_pos_fix.script` | Standalone. Wraps SortingPlus' `icon_junk`/`icon_favs` at `on_game_start` to correct mark positions. Named `zzz_aaa_*` so it wraps before SortingPlus registers the functors. |
+| `gamedata/scripts/zzz_aaa_hd_attachment_layer_fix.script` | Standalone. Replaces `UICellItem:Create_Layer` at `on_game_start` to redirect attachment overlays to the HD pack's gun-mounted `_x` icons. |
 | `gamedata/scripts/zzzz_loot_searching.script` | Patched copy of Looting Takes Time REDUX's script (must win over that mod in MO2). Only `get_sort_info` changed, to scale-correct the precomputed corpse grid. |
 
 ## Install
@@ -67,11 +81,12 @@ repo as an MO2 mod, so changes are playable without copying files:
 
 ## Debugging
 
-`seax_sortingplus_opt_sort_by_kind.script` and `zzz_aaa_hd_icon_mark_pos_fix.script`
-each have a `local DBG = false` flag near the top. Set it to `true` to log every
-footprint calculation, placement, and mark position to the xray log, prefixed
-`FIXHD|`. The mark fix script also logs the claimed area of every class-level
-`FindFreeCell` call, which identifies misplacements caused by other mods.
+Every script except the Looting Takes Time copy has a `local DBG = false` flag
+near the top. Set it to `true` to log footprint calculations, placements, mark
+positions, and attachment layer redirects to the xray log, prefixed `FIXHD|`.
+The mark fix script also logs the claimed area of every class-level
+`FindFreeCell` call and the inputs/results of every icon layer draw, which
+identifies misplacements caused by other mods.
 
 ## Resilience
 

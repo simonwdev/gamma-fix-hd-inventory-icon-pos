@@ -82,6 +82,24 @@ local function install_ffc_logger()
         end
         return area
     end
+
+    -- Log every icon layer draw (attachment overlays, indicator layers):
+    -- inputs, the coords read from configs, and where the layer ended up.
+    local base_cl = utils_ui.UICellItem and utils_ui.UICellItem.Create_Layer
+    if base_cl then
+        utils_ui.UICellItem.Create_Layer = function(self, ele, base_ico, sec_m, sec_l, str_x, str_y, str_scale)
+            base_cl(self, ele, base_ico, sec_m, sec_l, str_x, str_y, str_scale)
+            local p = ele:GetWndPos()
+            local cx = str_x and SYS_GetParam(2, sec_m, str_x, 0)
+            local cy = str_y and SYS_GetParam(2, sec_m, str_y, 0)
+            printf("FIXHD| layer [%s] on [%s] cfg=%s(%s)/%s(%s) grid=%s heading=%s -> pos=%s,%s size=%sx%s base=%sx%s(h=%s)",
+                tostring(sec_l), tostring(sec_m),
+                tostring(str_x), tostring(cx), tostring(str_y), tostring(cy),
+                tostring(self.grid_size), tostring(ele:GetHeading()),
+                p.x, p.y, ele:GetWidth(), ele:GetHeight(),
+                base_ico:GetWidth(), base_ico:GetHeight(), tostring(base_ico:GetHeading()))
+        end
+    end
 end
 
 function on_game_start()

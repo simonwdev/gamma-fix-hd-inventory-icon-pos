@@ -1,0 +1,178 @@
+--[[
+    Redirects weapon attachment icon layers to gun-mounted HD icons.
+
+    "HD Attachment Icons For GAMMA" ships straight, gun-mounted icons for
+    scopes/silencers as `<attachment_section>_x` sections (e.g. pu_x), and
+    rewires the weapon variants it covers to use them via 1icon_layer.
+    Any weapon variant the pack does not cover still draws the attachment's
+    *inventory item* icon on the gun -- and the pack's HD inventory icons are
+    drawn at an angle by design, so the overlay looks rotated and misaligned
+    (e.g. the PU scope on the Mosin Obrez).
+
+    This replaces utils_ui.UICellItem:Create_Layer (installed at on_game_start,
+    after every file-scope patcher: aaa_rax_icon_override_mcm and
+    utils_ui_icon_rotation_fix_mcm) with a version that:
+      - draws `<layer_section>_x` instead when that section exists, shifting
+        the configured coords so the visual center stays where the original
+        layer icon's center would have been (the two often render the same
+        size, in which case nothing moves);
+      - keeps the rotation-fix math for rotated base icons and the demonized
+        inv_grid_scale handling, and reads icon_override.ltx when present.
+
+    If utils_ui or ini_sys are missing this script does nothing; without the
+    HD pack no `_x` sections exist and the redirect never triggers.
+]] --
+
+local DBG = false -- diagnostics, greppable as "FIXHD|" in the xray log
+
+local math_ceil = math.ceil
+local SYS_GetParam = SYS_GetParam
+
+local applied = false
+
+-- Grid dims and scale for a layer section, icon_override.ltx first.
+-- Cached per section: this runs on every layer draw and the values are
+-- static for the session.
+local params_cache = {}
+local function layer_params(sec)
+    if not sec then return 1, 1, 1 end
+    local c = params_cache[sec]
+    if c then return c[1], c[2], c[3] end
+
+    local io = aaa_rax_icon_override_mcm and aaa_rax_icon_override_mcm.icon_override
+    local has = io and io:section_exist(sec)
+    local w = has and io:r_float_ex(sec, "inv_grid_width") or SYS_GetParam(2, sec, "inv_grid_width", 1) or 1
+    local h = has and io:r_float_ex(sec, "inv_grid_height") or SYS_GetParam(2, sec, "inv_grid_height", 1) or 1
+    local scale = has and (io:r_float_ex(sec, "inv_grid_scale") or 1) or SYS_GetParam(2, sec, "inv_grid_scale", 1) or 1
+    if not (scale > 0) then scale = 1 end
+    params_cache[sec] = { w, h, scale }
+    return w, h, scale
+end
+
+-- Section param for the owning item (weapon), icon_override.ltx first.
+-- Same read count as the code this replaces, so left uncached.
+local function owner_param(sec, field)
+    if not sec then return nil end
+    local io = aaa_rax_icon_override_mcm and aaa_rax_icon_override_mcm.icon_override
+    if io and io:section_exist(sec) then
+        local v = io:r_float_ex(sec, field)
+        if v then return v end
+    end
+    return SYS_GetParam(2, sec, field)
+end
+
+-- Gun-mounted `_x` variant for a layer section, plus the coord shift (in the
+-- 50px config space, before layer scale) that keeps the visual center where
+-- the original icon's center would be. Cached per section; false = no variant.
+local mount_cache = {}
+local function mount_redirect(sec_l)
+    if not sec_l then return end
+    local c = mount_cache[sec_l]
+    if c ~= nil then
+        if c then return c[1], c[2], c[3] end
+        return
+    end
+
+    local mounted
+    local cand = sec_l .. "_x"
+    if ini_sys:section_exist(cand) then
+        mounted = cand
+    else
+        -- The HD pack names these by short scope name (pso2 -> pso2_x), so
+        -- vanilla-style sections need the prefix stripped
+        -- (wpn_addon_scope_pu -> pu_x).
+        local short = string.gsub(sec_l, "^wpn_addon_scope_", "")
+        if short ~= sec_l then
+            cand = short .. "_x"
+            if ini_sys:section_exist(cand) then
+                mounted = cand
+            end
+        end
+    end
+
+    if not mounted then
+        mount_cache[sec_l] = false
+        return
+    end
+
+    local ow, oh, os = layer_params(sec_l)
+    local nw, nh, ns = layer_params(mounted)
+    local dx = (ow * 50 / os) - (nw * 50 / ns)
+    local dy = (oh * 50 / os) - (nh * 50 / ns)
+    mount_cache[sec_l] = { mounted, dx, dy }
+    return mounted, dx, dy
+end
+
+function on_game_start()
+    if applied then return end
+    if not (utils_ui and utils_ui.UICellItem and utils_ui.UICellItem.Create_Layer and ini_sys) then return end
+    applied = true
+    if DBG then printf("FIXHD| attachment layer fix installed") end
+
+    -- Based on utils_ui_icon_rotation_fix_mcm's Create_Layer (credits to
+    -- EverybodyLies/RavenAscendant for the rotation math) plus the redirect.
+    function utils_ui.UICellItem:Create_Layer(ele, base, sec_m, sec_l, str_x, str_y, str_scale)
+        local ratio = utils_xml.screen_ratio()
+        local grid_size = self.grid_size
+
+        local x = str_x and owner_param(sec_m, str_x) or 0
+        local y = str_y and owner_param(sec_m, str_y) or 0
+        local lscale = str_scale and owner_param(sec_m, str_scale) or 1
+
+        -- Redirect to the gun-mounted icon variant when one exists, keeping
+        -- the visual center where the original layer icon's center would be.
+        -- Anchor math: the drawn center sits at coord + rendered size (in the
+        -- 50px config space), so the shift is the full size difference.
+        local draw_sec = sec_l
+        local mounted, dx, dy = mount_redirect(sec_l)
+        if mounted then
+            x = x + dx * lscale
+            y = y + dy * lscale
+            draw_sec = mounted
+            if DBG then
+                printf("FIXHD| layer redirect [%s] -> [%s] on [%s] x=%s y=%s", sec_l, mounted, tostring(sec_m), x, y)
+            end
+        end
+
+        local w_g, h_g, gscale = layer_params(draw_sec)
+        local w = math_ceil(w_g * grid_size / gscale)
+        local h = math_ceil(h_g * grid_size / gscale)
+
+        local scale_pos = lscale * (grid_size / 50)
+
+        local rot = ele:GetHeading() > 0
+        local x_s = x * ratio * scale_pos
+        local y_s = y * scale_pos
+        local w_s = w * ratio * lscale
+        local h_s = h * lscale
+        local w_off = (w_s / 2)
+        local h_off = (h_s / 2)
+
+        if rot then
+            -- despite rotation, the dimensions of the base icon do not change!
+            -- Move start pos to match the one for rotated base icon.
+            -- Base icon rotates on its center: move to the center of the
+            -- window, then along the rotated image. The engine doesn't
+            -- stretch rotated images, so the old height is ratio-corrected
+            -- to get the new width; vertical movement needs no correction.
+            local w_b, h_b = base:GetWidth(), base:GetHeight()
+            local x_st = (w_b / 2) - (h_b / 2) * ratio
+            local y_st = (h_b / 2) + (w_b / 2)
+            -- On 90 rotation, x and y are inverted; y goes negative to
+            -- simulate normal x movement.
+            x_s = x_st + (y * ratio * scale_pos)
+            y_s = y_st - (x * scale_pos)
+            w_s = w * lscale -- window size doesn't change despite rotation
+            h_s = h * lscale
+            w_off = (h_s / 2) * ratio -- moves along x, needs ratio correction
+            h_off = -(w_s / 2)
+        end
+
+        ele:InitTexture(utils_xml.get_icons_texture(draw_sec))
+        ele:SetTextureRect(Frect():set(utils_xml.get_item_axis(draw_sec, nil, true)))
+        ele:SetStretchTexture(true)
+        ele:SetWndPos(vector2():set(x_s + w_off, y_s + h_off))
+        ele:SetWndSize(vector2():set(w_s, h_s))
+        ele:Show(true)
+    end
+end
