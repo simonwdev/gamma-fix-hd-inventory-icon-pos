@@ -1,0 +1,257 @@
+--[[
+    HD inventory icon position fix for sea-ex's "Inventory Open Lag Reducer" (464).
+
+    This file overrides the copy shipped by "464- Inventory Open Lag Reducer - sea-ex"
+    (and consumed by "468- Inventory Antifreeze - Demonized"), keeping its public API:
+        sort_by_kind_factory(t) -> comparator, patched_FindFreeCell
+
+    Fixes over the stock 464 version:
+
+    1. Cell footprints are divided by inv_grid_scale and resolved through
+       utils_xml.get_item_axis, which also reads HD_Inventory_Icons_Framework's
+       icon_override.ltx. Without this, HD icons (doubled inv_grid_width/height)
+       claim double-sized tiles after a sorted Reinit while being drawn at
+       normal size, so icons land in the wrong place.
+
+    2. While precomputing, zzz_rax_sortingplus_mcm.sort_info(sec, sec) is called
+       once per unique section. SortingPlus' class-level FindFreeCell places items
+       via its internal ab_k cache, which is normally filled as a side effect of
+       its own sort comparators. 464 replaces those comparators, so the cache
+       stayed empty and every *incremental* AddItem (taking/putting items while
+       looting an NPC; ui_inventory.UIInventory:LMode_RefreshInventories never
+       runs a full sorted Reinit) misfired the "new kind -> new row" logic.
+       Priming the cache here fixes item placement in NPC/loot inventories.
+
+    3. Caches fill lazily, so a comparator reused on items added after the
+       factory ran (Inventory Antifreeze's deferred mode re-sorts on AddItem)
+       never indexes nil.
+
+    4. Every cross-mod reference (SortingPlus, HD framework, magazine_binder,
+       and the exe-side "unlocalizer" that exposes SortingPlus' local tables)
+       is guarded. If any of them is missing this degrades to a plain
+       size/alphabetical sort instead of erroring.
+]] --
+
+local DBG = false -- diagnostics, greppable as "FIXHD|" in the xray log
+if DBG then printf("FIXHD| seax_sortingplus_opt_sort_by_kind override loaded") end
+
+-- upvalue caches for the comparator hot loop
+local type = type
+local math_ceil = math.ceil
+local SYS_GetParam = SYS_GetParam
+
+-- Kept for API compatibility with the stock 464 script; nil when SortingPlus is absent.
+get_sort_kind = zzz_rax_sortingplus_mcm and zzz_rax_sortingplus_mcm.get_sort_kind
+
+local function get_grid_scale(sec)
+    -- Same lookup order as the HD framework's own patches: icon_override.ltx
+    -- first (where HD icon packs define their grids), then the system ini.
+    local io = aaa_rax_icon_override_mcm and aaa_rax_icon_override_mcm.icon_override
+    if io and io:section_exist(sec) then
+        return io:r_float_ex(sec, "inv_grid_scale") or 1
+    end
+    return SYS_GetParam(2, sec, "inv_grid_scale", 1) or 1
+end
+
+local function get_grid_dims(sec)
+    -- get_item_axis with grid_size 1 returns dims in grid units. When the HD
+    -- framework is installed this function is patched to read icon_override.ltx,
+    -- keeping our footprints in sync with what UICellItem:Set actually renders.
+    if utils_xml and utils_xml.get_item_axis then
+        local ok, axis = pcall(utils_xml.get_item_axis, sec, 1)
+        if ok and axis and axis.w then
+            return axis.w, axis.h
+        end
+    end
+    return SYS_GetParam(2, sec, "inv_grid_width", 0) or 0,
+        SYS_GetParam(2, sec, "inv_grid_height", 0) or 0
+end
+
+function sort_by_kind_factory(t)
+    -- Resolve SortingPlus state per factory call in case it is reloaded (MCM etc.).
+    local sp = zzz_rax_sortingplus_mcm
+    local SORTFAVS = sp and sp.SORTFAVS
+    local SORTJUNK = sp and sp.SORTJUNK
+    -- These are locals inside SortingPlus, only visible when the modded exes'
+    -- unlocalizer exposed them. Fall back to empty tables so lookups stay safe.
+    local favorite_itms = sp and sp.favorite_itms or {}
+    local junk_itms = sp and sp.junk_itms or {}
+    local kind_to_order = sp and sp.item_order or {}
+    local sp_sort_info = sp and sp.sort_info
+    local get_kind = sp and sp.get_sort_kind or function(sec)
+        return SYS_GetParam(0, sec, "kind", "na")
+    end
+    local na_order = kind_to_order["na"]
+    local is_carried_mag = magazine_binder and magazine_binder.is_carried_mag
+
+    -- cached sec => kind (e.g. {bolt="w_misc", swiss_knife="i_tool"})
+    local sec_to_kind = {}
+    -- cached sec => kind_to_order[kind] sort order (e.g. {bolt=1, swiss_knife=5})
+    local sec_to_kind_order = {}
+    -- cached sec => rendered footprint in cells, inv_grid_scale already applied
+    local sec_to_width, sec_to_height = {}, {}
+
+    local function ensure(sec)
+        if sec_to_width[sec] then return end
+
+        local w, h = get_grid_dims(sec)
+        local scale = get_grid_scale(sec)
+        if scale and scale > 0 and scale ~= 1 then
+            w = math_ceil(w / scale)
+            h = math_ceil(h / scale)
+        end
+        sec_to_width[sec] = w > 0 and w or 1
+        sec_to_height[sec] = h > 0 and h or 1
+
+        local ok, kind = pcall(get_kind, sec)
+        kind = ok and kind or "na"
+        sec_to_kind[sec] = kind
+        sec_to_kind_order[sec] = kind_to_order[kind] or na_order
+
+        -- Prime SortingPlus' internal ab_* caches (ab_k etc.), used by its
+        -- class-level FindFreeCell on the incremental AddItem path (looting).
+        -- Our replacement comparator bypasses the sort functions that would
+        -- normally fill them.
+        if sp_sort_info then
+            pcall(sp_sort_info, sec, sec)
+        end
+
+        if DBG then
+            printf("FIXHD| ensure [%s] w=%s h=%s scale=%s kind=%s order=%s",
+                sec, sec_to_width[sec], sec_to_height[sec], tostring(scale),
+                tostring(kind), tostring(sec_to_kind_order[sec]))
+        end
+    end
+
+    -- O(n) precompute pass over the items to be sorted.
+    for k, _ in pairs(t) do
+        local v = t[k]
+        local sec = type(v) == "string" and v or v:section()
+        ensure(sec)
+    end
+
+    local sort_by_kind_custom = function(_, a, b)
+        -- HOT LOOP
+        a = t[a]
+        b = t[b]
+        local a_sec = a
+        local b_sec = b
+
+        -- normalize both to section strings
+        if type(a_sec) ~= "string" then
+            a_sec = a:section()
+        end
+        if type(b_sec) ~= "string" then
+            b_sec = b:section()
+        end
+
+        -- Items can be added after the factory ran (Inventory Antifreeze's
+        -- deferred mode reuses this comparator on AddItem); fill lazily.
+        if not sec_to_width[a_sec] then ensure(a_sec) end
+        if not sec_to_width[b_sec] then ensure(b_sec) end
+
+        local a_kind_order = sec_to_kind_order[a_sec]
+        local b_kind_order = sec_to_kind_order[b_sec]
+        if (is_carried_mag and type(a) ~= "string" and type(b) ~= "string") then
+            if is_carried_mag(a:id()) then
+                a_kind_order = kind_to_order["loadout"]
+            end
+
+            if is_carried_mag(b:id()) then
+                b_kind_order = kind_to_order["loadout"]
+            end
+        end
+
+        local a_override_kind_order = kind_to_order
+            [SORTFAVS and favorite_itms[a_sec] or SORTJUNK and junk_itms[a_sec]] or
+            false
+        local b_override_kind_order = kind_to_order
+            [SORTFAVS and favorite_itms[b_sec] or SORTJUNK and junk_itms[b_sec]] or
+            false
+
+        if a_override_kind_order ~= b_override_kind_order then
+            --if the overrides are equal sort by the actual kind
+            --otherwise sort by the overide if it exists or the orginal kind
+            a_kind_order = a_override_kind_order or a_kind_order
+            b_kind_order = b_override_kind_order or b_kind_order
+        end
+
+        if a_kind_order == b_kind_order then
+            -- sort_by_size
+            if (sec_to_width[a_sec] == sec_to_width[b_sec]) then
+                if (sec_to_height[a_sec] == sec_to_height[b_sec]) then
+                    if (a_sec == b_sec) then
+                        if (type(a) == "string") then return false end --true
+
+                        return a:id() > b:id()
+                    end
+                    -- alphaptic order
+
+                    return a_sec < b_sec
+                end
+
+                return sec_to_height[a_sec] > sec_to_height[b_sec]
+            end
+
+            return sec_to_width[a_sec] > sec_to_width[b_sec]
+        end
+
+        -- nil-guarded: an unknown kind must not error inside table.sort
+        return a_kind_order and b_kind_order and a_kind_order < b_kind_order
+    end
+
+
+    -- SortingPlus zzz_rax_sortingplus_mcm overrides UICellContainer.FindFreeCell
+    -- to use its own ab_k[] etc. variables which are produced during the sort's
+    -- sort_info(). This replacement (swapped in only for the duration of Reinit)
+    -- uses our precalculated, scale-aware footprints instead.
+    local patched_custom_FindFreeCell = function(self, obj, sec)
+        if (not sec) then
+            if (not obj) then return false end
+            sec = obj and obj:section()
+        end
+
+        if not sec_to_width[sec] then ensure(sec) end
+        local w = sec_to_width[sec]
+        local h = sec_to_height[sec]
+
+        -- Avoid icons that don't fit
+        if w > self.cols then return false end
+
+        -- Sorting by kind: when sorting a new kind, always start from last row taken by previous kind
+        if self.sort_method == "kind" then
+            local sort_kind = (is_carried_mag and obj and is_carried_mag(obj:id()) and "loadout")
+                or (SORTFAVS and favorite_itms[sec])
+                or (SORTJUNK and junk_itms[sec])
+                or sec_to_kind[sec]
+            self.rKind.current = kind_to_order[sort_kind] or na_order
+
+            if (self.rKind.last ~= self.rKind.current) then
+                self.rKind.last = self.rKind.current
+                self.rKind.row = self.row_end + 1
+            end
+        end
+
+        local row_s = self.rKind.row
+        local rows = #self.grid
+        local cols = self.cols + 1 - w
+        if DBG then
+            printf("FIXHD| FFC [%s] cc=%s sort=%s w=%s h=%s row_s=%s rk_cur=%s rk_last=%s",
+                sec, tostring(self.ID), tostring(self.sort_method), w, h,
+                tostring(row_s), tostring(self.rKind.current), tostring(self.rKind.last))
+        end
+        self:Print(nil, "FindFreeCell for [%s] (rows: %s, cols: %s, W: %s, H: %s)", sec, rows, cols, w, h)
+
+        for r = row_s, rows do
+            for c = 1, cols do
+                if self:IsFreeRoom(r, c, w, h) then return self:TakeRoom(r, c, w, h) end
+            end
+        end
+
+        self:Grow()
+
+        return self:FindFreeCell(obj, sec)
+    end
+
+    return sort_by_kind_custom, patched_custom_FindFreeCell
+end

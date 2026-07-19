@@ -1,0 +1,6 @@
+# MO2 writes its per-install metadata into the mod folder; with the repo
+# junction-linked as the live mod, that lands in the repo root.
+meta.ini
+
+# release build output
+dist/

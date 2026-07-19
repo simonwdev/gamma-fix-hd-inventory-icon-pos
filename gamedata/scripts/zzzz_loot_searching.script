@@ -1,0 +1,1988 @@
+--[[
+    Looting Takes Time Enhanced (Tarkov like looting)
+    Original by: xcvb
+    Re-written & improved by: Abraham (Priler)
+    Github repo: https://github.com/Priler/tarkov_looting
+    
+    Check out ModDB page for more details: https://www.moddb.com/mods/stalker-anomaly/addons/looting-takes-time-redux-tarkov-like-looting
+
+    Patched by "Fix HD Inventory Icon Position": get_sort_info now returns
+    rendered cell sizes (inv_grid dims divided by inv_grid_scale, honoring
+    icon_override.ltx like the rest of the UI). The corpse grid layout this
+    mod precomputes is placed via TakeRoom, which works in rendered cells;
+    with raw dims, HD icons reserved double-size tiles and the loot window
+    showed cell-wide gaps between items. Only get_sort_info changed.
+--]]
+
+
+
+-- Fix HD Inventory Icon Position: this file is an override patch for Looting
+-- Takes Time REDUX. If that mod is not installed, its MCM companion script
+-- (zzzz_loot_searching_mcm) is absent -- bail out before applying any of its
+-- UI monkeypatches, since the mod's XML and sound assets would be missing too
+-- (ParseFile on a missing xml crashes the game).
+if not zzzz_loot_searching_mcm then
+    return
+end
+
+
+
+-- ### STATE TABLES
+
+local corpses = {}              -- [npc_id][item_id] = nil/true/false
+local initial_inv = {}          -- [npc_id][item_id] = true
+local corpse_rank = {}          -- [npc_id] = rank_multiplier
+local item_positions = {}       -- [npc_id][item_id] = {row, col, w, h}
+local item_reveal_order = {}    -- [npc_id] = {item_id, ...}
+local loading_spinners = {}     -- [item_id] = CUIStatic element
+local spinner_xml = nil         -- Cached XML for spinners
+local resumed_search = {}       -- [npc_id] = true if search was resumed this session
+local search_init_tick = {}     -- [npc_id] = time_global() at first init (post-open bonus window)
+local cur_npc_id = nil
+
+-- While we own a loot body we flip its npc_bag onto a non-"kind" sort method so
+-- the other inventory sort mods stand down on it (they only re-pack a "kind"
+-- container)
+local npc_sort_locked = false
+local saved_npc_sort_method = nil
+
+-- Haruka scavenging comp
+local NEW_ITEM_SPINNER_WINDOW = 2000  -- ms
+
+-- Cached values for performance
+local cached_aspect_correction = nil  -- Calculated once per session
+local cached_sil_r, cached_sil_g, cached_sil_b = nil, nil, nil  -- Recalculated on settings change
+local cached_looting_text = nil       -- Cached looting text per faction
+local cached_looting_faction = nil    -- Track faction for cache invalidation
+
+-- Get cached aspect ratio correction (STALKER UI is 4:3, widescreen stretches width)
+local function get_aspect_correction()
+    if not cached_aspect_correction then
+        local screen_w = device().width
+        local screen_h = device().height
+        cached_aspect_correction = (screen_h / screen_w) * (4 / 3)
+    end
+    return cached_aspect_correction
+end
+
+
+
+-- ### HARUKA'S SKILLS INTEGRATION
+
+-- Returns time multiplier based on scavenging skill (1.0 = no bonus, 0.5 = max bonus)
+-- Automatically detects if Haruka's Skills mod is installed
+-- Also returns debug info: detected, current_level, max_level
+local function get_haruka_scavenging_multiplier()
+    -- Read debug setting directly from MCM (so changes take effect immediately)
+    local debug_max = false
+    if ui_mcm and ui_mcm.get then
+        debug_max = ui_mcm.get("loot_searching/debug_haruka_max_level")
+    end
+    
+    -- Check if Haruka's Skills mod is installed
+    if not haru_skills then 
+        -- If debug mode is enabled but Haruka's Skills not installed, simulate it
+        if debug_max then
+            return 0.5, true, 15, 15  -- Simulate max level (0.5x multiplier)
+        end
+        return 1.0, false, 0, 0
+    end
+    
+    -- Check if skills_levels table exists
+    if not haru_skills.skills_levels then 
+        if debug_max then
+            return 0.5, true, 15, 15  -- Simulate max level
+        end
+        return 1.0, false, 0, 0
+    end
+    
+    -- Check if scavenging skill exists
+    local scav = haru_skills.skills_levels["scavenging"]
+    if not scav then 
+        if debug_max then
+            return 0.5, true, 15, 15  -- Simulate max level
+        end
+        return 1.0, true, 0, 0  -- Mod detected but scavenging skill not found
+    end
+    
+    -- Get current and max level with safe defaults
+    local current_level = scav.current_level or 0
+    local max_level = scav.max_level or 15
+    
+    -- Debug: Override to max level if enabled
+    if debug_max then
+        current_level = max_level
+    end
+    
+    -- Prevent division by zero
+    if max_level <= 0 then
+        return 1.0, true, current_level, max_level
+    end
+    
+    -- Calculate multiplier: 1.0 at level 0, 0.5 at max level
+    -- Formula: mult = 1.0 - (progress * 0.5)
+    local progress = math.min(current_level / max_level, 1.0)  -- Clamp to 1.0 max
+    local multiplier = 1.0 - (progress * 0.5)
+    
+    return multiplier, true, current_level, max_level
+end
+
+local sfind = string.find
+
+
+
+-- ### SOUND TABLES
+
+local snd_t = {
+    ["w_ammo"] = { "ammo_1", "ammo_2", "ammo_3", "ammo_4" },
+    ["w_misc"] = { "parts_1", "parts_2", "parts_3" },
+    ["w_explosive"] = { "grenade_1", "grenade_2" },
+    ["w_melee"] = { "knife_1", "knife_2" },
+    ["wpn"] = { "wpn_1", "wpn_2" },
+    ["o_helmet"] = { "cloth_1" },
+    ["outfit"] = { "cloth_2", "cloth_3" },
+    ["i_arty"] = { "cloth_1", "cloth_2" },
+    ["i_arty_cont"] = { "wpnbig_1", "wpnbig_2" },
+    ["i_arty_junk"] = { "cloth_1", "cloth_2" },
+    ["i_attach"] = { "parts_1", "parts_2", "parts_3" },
+    ["i_drink"] = { "bottle_1", "bottle_2", "bottle_3", "bottle_4" },
+    ["i_medical"] = { "pills_1", "pills_2" },
+    ["i_tool"] = { "take_all" },
+    ["i_device"] = { "parts_1", "parts_2" },
+    ["i_letter"] = { "money_paper" },
+    ["i_part"] = { "parts_1", "parts_2", "parts_3" },
+    ["money_paper"] = { "money_paper" },
+    ["money_coin"] = { "money_coin_1", "money_coin_2" },
+    ["generic"] = { "generic_3", "generic_4", "generic_5", "parts_2" },
+}
+
+local replace_snd_by_sec = {
+    ["money_paper"] = { "cash", "money" },
+    ["money_coin"] = { "roubles" },
+    ["generic"] = { "joint", "marijuana", "cigarettes", "cigar", "tobacco", "drug_booster", "bandage", "jgut", "stimpack", "rebirth", "tetanus", "glucose", "cocaine", "salicidic_acid", "morphine", "adrenalin" },
+}
+
+local replace_snd_by_kind = {
+    ["wpn"] = { "w_rifle", "w_pistol", "w_smg", "w_shotgun", "w_sniper" },
+    ["outfit"] = { "o_heavy", "o_light", "o_medium", "o_sci" },
+}
+
+
+
+-- ### MCM SETTINGS
+
+local enable_corpses = true
+local enable_containers = false
+local autolooter_show_blocked_msg = true  -- Show message when autolooter is blocked
+local presort_grid = true  -- Pre-sort items on grid (larger items first)
+local time_max = 20
+local first_item_delay = 1        -- Delay before anything appears
+local silhouette_appear_min = 0.2 -- Min random time for silhouette appearance
+local silhouette_appear_max = 1.5 -- Max random time for silhouette appearance
+local delay_between_min = 0.1     -- Min delay from silhouette to reveal
+local delay_between_max = 1.0     -- Max delay from silhouette to reveal
+local min_reveal_interval = 0.05  -- Minimum time between item reveals (prevents overlap at high speed)
+local silhouette_intensity = 90   -- Darkness percentage (0-100)
+local silhouette_color_r = 0      -- Base color R (0-255)
+local silhouette_color_g = 0      -- Base color G (0-255)
+local silhouette_color_b = 0      -- Base color B (0-255)
+local spinner_size = 32           -- Spinner size in pixels
+local spinner_scale_mode = 1      -- 1=fixed, 2=scale with item
+local spinner_style = "half_circle_colored"  -- Icon style folder name
+local spinner_opacity = 100       -- Spinner opacity (10-100%)
+
+-- Table of spinner styles that have valid textures
+-- Runtime validation will add more styles if their textures exist
+local validated_spinner_styles = {
+    ["default"] = true,
+    ["arrows"] = true,
+    ["wheel"] = true,
+    ["chasing_arrows"] = true,
+    ["fading_line"] = true,
+    ["tarkov_like"] = true,
+    ["growing_ring"] = true,
+    ["half_circle"] = true,
+    ["half_circle_colored"] = true,
+    ["half_circle_dimmed"] = true,
+    ["half_circle_green"] = true,
+    ["line"] = true,
+    ["recycle"] = true,
+    ["search"] = true,
+    ["search_orange"] = true,
+    ["spinning_segments"] = true,
+    ["two_arrows"] = true,
+}
+
+local hud_enable = true
+local hud_icon = 1
+local hud_indicator_style = "default"  -- style folder for animated indicator
+local hud_indicator_x = 165
+local hud_indicator_y = 80
+local hud_indicator_scale = 70  -- scale percentage
+local hud_text_x = 210
+local hud_text_y = 82
+local sound_enable = true
+local sound_enable_vol = 1
+local sound_bg_enable = true
+local sound_bg_enable_vol = 1.25
+local rank_enable = true
+local reveal_mode = 1           -- 1=positional, 2=size-based
+local placeholder_mode = 1      -- 0=none, 1=dark silhouettes, 2=loading icon
+local debugx = false
+local debug_haruka_max_level = false  -- Simulate max Haruka's Skills scavenging level
+
+local rank_mult = {
+    ["novice"] = 0.5,
+    ["trainee"] = 0.5,
+    ["experienced"] = 0.8,
+    ["professional"] = 0.8,
+    ["veteran"] = 1.2,
+    ["expert"] = 1.2,
+    ["master"] = 1.3,
+    ["legend"] = 1.7,
+}
+
+
+-- ### DEBUG (defined early so load_settings can use it)
+
+local function pr(fmt, ...)
+    if not debugx then return end
+    local args = {...}
+    local msg
+    if #args > 0 then
+        msg = string.format(fmt, ...)
+    else
+        msg = fmt
+    end
+    printf("[LootTime] %s", msg)
+end
+
+local function load_settings()
+    local mcm = zzzz_loot_searching_mcm
+    
+    local function get_num(key, default)
+        local val = mcm.get_config(key)
+        if val == nil then return default end
+        return tonumber(val) or default
+    end
+    
+    local function get_bool(key, default)
+        local val = mcm.get_config(key)
+        if val == nil then return default end
+        return val
+    end
+    
+    -- Targets
+    enable_corpses = get_bool("enable_corpses", true)
+    enable_containers = get_bool("enable_containers", false)
+    
+    -- Compatibility
+    autolooter_show_blocked_msg = get_bool("autolooter_show_blocked_msg", true)
+    presort_grid = get_bool("presort_grid", true)
+    
+    -- Timing
+    time_max = get_num("time_max", 20)
+    first_item_delay = get_num("first_item_delay", 1)
+    silhouette_appear_min = get_num("silhouette_appear_min", 0.2)
+    silhouette_appear_max = get_num("silhouette_appear_max", 1.5)
+    delay_between_min = get_num("delay_between_min", 0.1)
+    delay_between_max = get_num("delay_between_max", 1.0)
+    
+    -- Silhouette settings
+    silhouette_intensity = get_num("silhouette_intensity", 90)
+    silhouette_color_r = get_num("silhouette_color_r", 0)
+    silhouette_color_g = get_num("silhouette_color_g", 0)
+    silhouette_color_b = get_num("silhouette_color_b", 0)
+    spinner_size = get_num("spinner_size", 32)
+    spinner_scale_mode = get_num("spinner_scale_mode", 1)
+    spinner_style = mcm.get_config("spinner_style") or "default"
+    spinner_opacity = get_num("spinner_opacity", 100)
+    
+    -- Dynamically validate spinner style by checking if texture exists
+    if not validated_spinner_styles[spinner_style] then
+        local fs = getFS()
+        local texture_path = "textures\\ui\\loot_searching\\" .. spinner_style .. "\\spinner_atlas.dds"
+        if fs:exist("$game_data$", texture_path) then
+            validated_spinner_styles[spinner_style] = true
+            pr("~ Validated spinner style: %s", spinner_style)
+        else
+            pr("! Spinner style '%s' has no textures, will use default", spinner_style)
+        end
+    end
+    
+    hud_enable = get_bool("hud_enable", true)
+    hud_icon = get_num("hud_icon", 1)
+    hud_indicator_style = mcm.get_config("hud_indicator_style") or "default"
+    hud_indicator_x = get_num("hud_indicator_x", 165)
+    hud_indicator_y = get_num("hud_indicator_y", 80)
+    hud_indicator_scale = get_num("hud_indicator_scale", 70)
+    hud_text_x = get_num("hud_text_x", 210)
+    hud_text_y = get_num("hud_text_y", 82)
+    sound_enable = get_bool("sound_enable", true)
+    sound_enable_vol = get_num("sound_enable_vol", 1)
+    sound_bg_enable = get_bool("sound_bg_enable", true)
+    sound_bg_enable_vol = get_num("sound_bg_enable_vol", 1.25)
+    rank_enable = get_bool("rank_enable", true)
+    reveal_mode = get_num("reveal_mode", 1)
+    placeholder_mode = get_num("placeholder_mode", 1)
+    debugx = get_bool("debugx", false)
+    debug_haruka_max_level = get_bool("debug_haruka_max_level", false)
+    
+    rank_mult["novice"] = get_num("rank_novice", 0.5)
+    rank_mult["trainee"] = get_num("rank_novice", 0.5)
+    rank_mult["experienced"] = get_num("rank_experienced", 0.8)
+    rank_mult["professional"] = get_num("rank_experienced", 0.8)
+    rank_mult["veteran"] = get_num("rank_veteran", 1.2)
+    rank_mult["expert"] = get_num("rank_veteran", 1.2)
+    rank_mult["master"] = get_num("rank_master", 1.3)
+    rank_mult["legend"] = get_num("rank_legend", 1.7)
+end
+
+
+
+-- ### UTILITY
+
+local function is_valid_target(npc)
+    if not npc then return false end
+    
+    -- Check if it's a container (invbox/stash)
+    if IsInvbox(npc) then
+        return enable_containers
+    end
+    
+    -- Check if it's a corpse
+    if IsStalker(npc) and not npc:alive() then
+        return enable_corpses
+    end
+    
+    return false
+end
+
+local function get_rank_multiplier(npc)
+    if not rank_enable then return 1.0 end
+    if not npc then return 1.0 end
+    
+    local rank_name = nil
+    if ranks and ranks.get_obj_rank_name then
+        rank_name = ranks.get_obj_rank_name(npc)
+    end
+    
+    if not rank_name or rank_name == "" then
+        local rank_val = npc.character_rank and npc:character_rank() or 0
+        if rank_val < 300 then rank_name = "novice"
+        elseif rank_val < 600 then rank_name = "experienced"
+        elseif rank_val < 900 then rank_name = "veteran"
+        elseif rank_val < 1200 then rank_name = "master"
+        else rank_name = "legend"
+        end
+    end
+    
+    return rank_mult[rank_name] or 1.0
+end
+
+-- Check if item is hidden (blocks interaction) - true for both "hidden" and "silhouette" states
+function is_item_hidden(npc_id, item_id)
+    if not npc_id or not item_id then return false end
+    if not corpses[npc_id] then return false end
+    local state = corpses[npc_id][item_id]
+    return state == "hidden" or state == "silhouette"
+end
+
+
+
+-- ### SOUND
+
+local function play_found_sound(item_id)
+    if not sound_enable then return end
+    
+    -- Try to get item object - first from level, then try inventory
+    local obj = level.object_by_id(item_id)
+    if not obj then
+        -- Item might be in inventory, not on level - try to get it from actor or NPC
+        obj = db.actor:object(item_id)
+    end
+    
+    -- If still not found, try active NPC (loot target)
+    if not obj then
+        local gui = ui_inventory.GUI
+        if gui and gui.npc then
+            obj = gui.npc:object(item_id)
+        end
+    end
+    
+    local sec
+    if obj then
+        sec = obj:section()
+    else
+        -- Fallback: play generic sound if we can't determine item type
+        pr("! Could not find item %d for sound, using generic", item_id)
+        local snd_list = snd_t["generic"]
+        local snd_name = snd_list[math.random(#snd_list)]
+        local snd_path = "interface\\items\\inv_items_" .. snd_name
+        local snd = sound_object(snd_path)
+        if snd then
+            snd:play_at_pos(db.actor, VEC_ZERO, 0, sound_object.s2d)
+            snd.volume = snd.volume * sound_enable_vol
+        end
+        return
+    end
+    
+    local kind = SYS_GetParam(0, sec, "kind", "generic")
+    
+    local skip_sfind = false
+    for new_kind, kinds in pairs(replace_snd_by_kind) do
+        for _, k in ipairs(kinds) do
+            if k == kind then
+                kind = new_kind
+                skip_sfind = true
+                break
+            end
+        end
+        if skip_sfind then break end
+    end
+    
+    if not skip_sfind then
+        for new_kind, patterns in pairs(replace_snd_by_sec) do
+            for _, pat in ipairs(patterns) do
+                if sfind(sec, pat) then
+                    kind = new_kind
+                    break
+                end
+            end
+        end
+    end
+    
+    local snd_list = snd_t[kind] or snd_t["generic"]
+    local snd_name = snd_list[math.random(#snd_list)]
+    local snd_path = "interface\\items\\inv_items_" .. snd_name
+    
+    local snd = sound_object(snd_path)
+    if snd then
+        snd:play_at_pos(db.actor, VEC_ZERO, 0, sound_object.s2d)
+        snd.volume = snd.volume * sound_enable_vol
+    end
+end
+
+
+
+-- ### GRID POSITION CALCULATION
+
+local sort_cache = { w = {}, h = {}, k = {} }
+local item_order = nil
+
+local function init_item_order()
+    if item_order then return end
+    item_order = {}
+    local n = ini_sys:line_count("item_kind_order")
+    for i = 0, n - 1 do
+        local _, kind, order = ini_sys:r_line_ex("item_kind_order", i, "", "")
+        if kind and order then
+            item_order[kind] = tonumber(order) or 30
+        end
+    end
+    item_order["na"] = size_table(item_order) + 1
+end
+
+local function get_sort_info(sec)
+    if not sort_cache.w[sec] then
+        -- Fix HD Inventory Icon Position: use rendered cell sizes. Grid dims
+        -- and inv_grid_scale come from icon_override.ltx when present (same
+        -- lookup order as the HD framework's UICellItem:Set), falling back to
+        -- the system ini. All guarded so this works without those mods.
+        local io = aaa_rax_icon_override_mcm and aaa_rax_icon_override_mcm.icon_override
+        local has_override = io and io:section_exist(sec)
+        local w = has_override and io:r_float_ex(sec, "inv_grid_width") or SYS_GetParam(2, sec, "inv_grid_width", 1) or 1
+        local h = has_override and io:r_float_ex(sec, "inv_grid_height") or SYS_GetParam(2, sec, "inv_grid_height", 1) or 1
+        local scale = has_override and (io:r_float_ex(sec, "inv_grid_scale") or 1) or SYS_GetParam(2, sec, "inv_grid_scale", 1) or 1
+        if scale > 0 and scale ~= 1 then
+            w = math.ceil(w / scale)
+            h = math.ceil(h / scale)
+        end
+        sort_cache.w[sec] = w > 0 and w or 1
+        sort_cache.h[sec] = h > 0 and h or 1
+        local kind = SYS_GetParam(0, sec, "kind", "na")
+        if not item_order or not item_order[kind] then kind = "na" end
+        sort_cache.k[sec] = item_order and item_order[kind] or 30
+    end
+    return sort_cache.w[sec], sort_cache.h[sec], sort_cache.k[sec]
+end
+
+local function sort_items_by_size(items)
+    init_item_order()
+    
+    -- Check if Magazines Redux is installed for magazine prioritization
+    local is_magazine = magazine_binder and magazine_binder.is_magazine
+    local is_carried_mag = magazine_binder and magazine_binder.is_carried_mag
+    
+    table.sort(items, function(a, b)
+        -- If Magazines Redux is installed, prioritize magazines
+        if is_magazine then
+            local a_carried = is_carried_mag and is_carried_mag(a.id)
+            local b_carried = is_carried_mag and is_carried_mag(b.id)
+            local a_mag = is_magazine(a.id)
+            local b_mag = is_magazine(b.id)
+            
+            -- Carried/ready mags first
+            if a_carried ~= b_carried then
+                return a_carried
+            end
+            -- Regular magazines second
+            if a_mag ~= b_mag then
+                return a_mag
+            end
+        end
+        
+        -- Standard sorting: by size, kind, section, id
+        local aw, ah, ak = get_sort_info(a.sec)
+        local bw, bh, bk = get_sort_info(b.sec)
+        if aw ~= bw then return aw > bw end
+        if ah ~= bh then return ah > bh end
+        if ak ~= bk then return ak < bk end
+        if a.sec ~= b.sec then return a.sec < b.sec end
+        return a.id < b.id
+    end)
+    return items
+end
+
+local function calculate_positions(npc_id, npc)
+    item_positions[npc_id] = {}
+    
+    -- Read presort_grid directly from MCM for immediate effect
+    local do_presort = presort_grid
+    if ui_mcm and ui_mcm.get then
+        local mcm_val = ui_mcm.get("loot_searching/presort_grid")
+        if mcm_val ~= nil then
+            do_presort = mcm_val
+        end
+    end
+    
+    -- OPTION 1: Force reset the game's actual grid to prevent desync (only when pre-sorting)
+    if do_presort then
+        local gui = ui_inventory.GUI
+        if gui and gui.CC and gui.CC["npc_bag"] then
+            local cc = gui.CC["npc_bag"]
+            -- Reset the grid to clear any stale state
+            if cc.grid then
+                for r = 1, #cc.grid do
+                    for c = 1, #cc.grid[r] do
+                        cc.grid[r][c] = true
+                    end
+                end
+            end
+            -- Also reset tracking variables
+            if cc.rKind then
+                cc.rKind.last = nil
+                cc.rKind.current = nil
+                cc.rKind.row = 1
+            end
+            cc.row_end = 0
+            pr("  Force reset npc_bag grid before position calculation")
+        end
+    end
+    
+    local items = {}
+    local seen_ids = {}  -- Prevent duplicates from iterate_inventory + iterate_ruck
+    local function collect(_, obj)
+        local id = obj:id()
+        if seen_ids[id] then return end  -- Skip duplicates
+        seen_ids[id] = true
+        
+        local sec = obj:section()
+        local w, h = get_sort_info(sec)
+        local weight = SYS_GetParam(2, sec, "inv_weight", 1)
+        table.insert(items, { 
+            id = id, 
+            sec = sec,
+            w = w,
+            h = h,
+            weight = weight,
+            grid_size = w * h
+        })
+    end
+    npc:iterate_inventory(collect, npc)
+    npc:iterate_ruck(collect, npc)  -- Also check ruck/backpack
+    
+    sort_items_by_size(items)
+    
+    local cols = 10
+    local gui = ui_inventory.GUI
+    if gui and gui.CC and gui.CC["npc_bag"] and gui.CC["npc_bag"].cols then
+        cols = gui.CC["npc_bag"].cols
+    end
+    
+    local grid = {}
+    for r = 1, 100 do
+        grid[r] = {}
+        for c = 1, cols do
+            grid[r][c] = true
+        end
+    end
+    
+    local function is_free(row, col, w, h)
+        if col + w - 1 > cols then return false end
+        for r = row, row + h - 1 do
+            if not grid[r] then return false end
+            for c = col, col + w - 1 do
+                if not grid[r][c] then return false end
+            end
+        end
+        return true
+    end
+    
+    local function take(row, col, w, h)
+        for r = row, row + h - 1 do
+            for c = col, col + w - 1 do
+                grid[r][c] = false
+            end
+        end
+    end
+    
+    local function find_free(w, h)
+        for row = 1, 100 do
+            for col = 1, cols - w + 1 do
+                if is_free(row, col, w, h) then
+                    return row, col
+                end
+            end
+        end
+        return 1, 1
+    end
+    
+    for _, item in ipairs(items) do
+        local row, col = find_free(item.w, item.h)
+        take(row, col, item.w, item.h)
+        item.row = row
+        item.col = col
+        item_positions[npc_id][item.id] = { row = row, col = col, w = item.w, h = item.h }
+    end
+    
+    item_reveal_order[npc_id] = {}
+    
+    if reveal_mode == 1 then
+        table.sort(items, function(a, b)
+            if a.row ~= b.row then return a.row < b.row end
+            return a.col < b.col
+        end)
+        pr("  Reveal mode: POSITIONAL")
+    else
+        -- Size-based: larger/heavier items first
+        table.sort(items, function(a, b)
+            local score_a = a.weight + a.grid_size
+            local score_b = b.weight + b.grid_size
+            return score_a > score_b  -- Larger first
+        end)
+        pr("  Reveal mode: SIZE-BASED (larger first)")
+    end
+    
+    for i, item in ipairs(items) do
+        item_reveal_order[npc_id][i] = item.id
+    end
+    
+    pr("Calculated %d positions", #items)
+end
+
+
+
+-- ### ATLAS ANIMATION
+
+local spinner_atlas_meta = { fps = 26, frames = 13, cols = 4, tile_w = 128, tile_h = 128 }
+local indicator_atlas_meta = { fps = 26, frames = 13, cols = 4, tile_w = 256, tile_h = 32 }
+
+-- Current frame index from wall clock, so every spinner stays in sync
+local function atlas_frame(meta)
+    local per = 1000 / (meta.fps or 26)
+    return math.floor(time_global() / per) % (meta.frames or 1)
+end
+
+-- Point a static at tile f of its atlas
+local function set_frame(static, meta, f)
+    local col = f % meta.cols
+    local row = math.floor(f / meta.cols)
+    local x = col * meta.tile_w
+    local y = row * meta.tile_h
+    static:SetTextureRect(Frect():set(x, y, x + meta.tile_w, y + meta.tile_h))
+end
+
+
+
+-- ### LOADING SPINNER MANAGEMENT
+
+local function get_spinner_xml()
+    if not spinner_xml then
+        spinner_xml = CScriptXmlInit()
+        spinner_xml:ParseFile("ui_xcvb_looting.xml")
+    end
+    return spinner_xml
+end
+
+local function create_spinner_for_cell(item_id, cell_item)
+    if loading_spinners[item_id] then return end
+    if not cell_item then return end
+    
+    local ico = cell_item.ico
+    if not ico then return end
+    
+    local xml = get_spinner_xml()
+    if not xml then return end
+    
+    -- Create spinner as child of the icon
+    local spinner = xml:InitStatic("cell_spinner", ico)
+    if not spinner then
+        pr("! Failed to create spinner for item %d", item_id)
+        return
+    end
+    
+    -- Set texture based on selected style, with fallback to default
+    -- Use validated_spinner_styles table to check if style has textures
+    local style_to_use = spinner_style
+    if not validated_spinner_styles[style_to_use] then
+        pr("! Style '%s' not validated, falling back to default", spinner_style)
+        style_to_use = "default"
+    end
+    
+    local texture_path = "ui\\loot_searching\\" .. style_to_use .. "\\spinner_atlas"
+    spinner:InitTexture(texture_path)
+    set_frame(spinner, spinner_atlas_meta, atlas_frame(spinner_atlas_meta))
+
+    -- Get icon dimensions
+    local ico_w = ico:GetWidth()
+    local ico_h = ico:GetHeight()
+    
+    -- Calculate spinner size based on mode
+    local sz
+    if spinner_scale_mode == 2 then
+        -- Scale with item: 50% of smallest dimension, capped by spinner_size
+        sz = math.min(ico_w, ico_h) * 0.5
+        sz = math.max(sz, 16)  -- Minimum 16px
+        sz = math.min(sz, spinner_size)  -- Maximum from settings
+    else
+        -- Fixed size from settings
+        sz = spinner_size
+    end
+    
+    -- Apply cached aspect ratio correction to keep spinner square
+    local aspect_correction = get_aspect_correction()
+    local corrected_w = sz * aspect_correction
+    
+    spinner:SetWndSize(vector2():set(corrected_w, sz))
+    
+    -- Center spinner on the icon (using corrected width)
+    local x = (ico_w - corrected_w) / 2
+    local y = (ico_h - sz) / 2
+    spinner:SetWndPos(vector2():set(x, y))
+    
+    spinner:SetStretchTexture(true)
+    
+    -- Apply opacity
+    local alpha = math.floor(spinner_opacity * 255 / 100)
+    spinner:SetTextureColor(GetARGB(alpha, 255, 255, 255))
+    
+    spinner:Show(true)
+    
+    loading_spinners[item_id] = spinner
+    pr("  Created spinner for item %d at (%.0f, %.0f) size=%.0fx%.0f style=%s opacity=%d%%", item_id, x, y, corrected_w, sz, spinner_style, spinner_opacity)
+end
+
+local function remove_spinner(item_id)
+    local spinner = loading_spinners[item_id]
+    if spinner then
+        spinner:Show(false)
+        loading_spinners[item_id] = nil
+        pr("  Removed spinner for item %d", item_id)
+    end
+end
+
+local function cleanup_all_spinners()
+    for item_id, spinner in pairs(loading_spinners) do
+        if spinner then
+            spinner:Show(false)
+        end
+    end
+    loading_spinners = {}
+    pr("Cleaned up all spinners")
+end
+
+
+
+-- ### SEARCH TIME CALCULATION
+
+-- Get the appropriate looting text based on player faction
+local function get_looting_text()
+    -- Check if we have a cached value for the current faction
+    local faction
+    if db.actor then
+        local se_actor = alife_object(db.actor:id())
+        if se_actor then
+            faction = se_actor:community()
+        end
+    end
+    
+    -- Return cached value if faction hasn't changed
+    if cached_looting_text and cached_looting_faction == faction then
+        return cached_looting_text
+    end
+    
+    -- Update cache
+    cached_looting_faction = faction
+    if faction == "bandit" or faction == "renegade" then
+        cached_looting_text = game.translate_string("st_xcvb_looting_bandit")
+    else
+        cached_looting_text = game.translate_string("st_xcvb_looting")
+    end
+    return cached_looting_text
+end
+
+-- Helper function to get random delay between items
+local function get_random_delay()
+    return delay_between_min + math.random() * (delay_between_max - delay_between_min)
+end
+
+local function calc_search_time(order_index, npc_id, total_items)
+    local rmult = corpse_rank[npc_id] or 1.0
+    
+    -- Calculate time: first_delay + cumulative random appear times + reveal delay
+    local time = first_item_delay
+    for i = 1, order_index do
+        time = time + silhouette_appear_min + math.random() * (silhouette_appear_max - silhouette_appear_min)
+    end
+    time = time + get_random_delay()
+    time = time * rmult
+    
+    -- Apply Haruka's Skills scavenging bonus (if mod is installed)
+    -- Note: logging handled in ParseInventory to avoid duplicates
+    local haruka_mult = get_haruka_scavenging_multiplier()
+    time = time * haruka_mult
+    
+    -- Cap max time based on total items count
+    local effective_max = time_max * rmult * haruka_mult
+    if total_items then
+        if total_items <= 2 then
+            effective_max = math.min(effective_max, 3.0 * haruka_mult)
+        elseif total_items <= 5 then
+            effective_max = math.min(effective_max, 7.0 * haruka_mult)
+        end
+    end
+    
+    time = math.min(time, effective_max)
+    return math.max(time, 0.3)
+end
+
+
+
+-- ### CORPSE/CONTAINER INITIALIZATION
+
+-- Note: Primary initialization now happens in ParseInventory to prevent flash
+-- This function is kept as a backup and to set cur_npc_id
+function save_initial_inv()
+    local inventory = ui_inventory.GUI
+    if not inventory then return true end
+    
+    local npc = inventory:GetPartner()
+    local npc_id = npc and npc:id()
+    
+    if inventory.mode ~= "loot" or not npc_id then return true end
+    if not is_valid_target(npc) then return true end
+    
+    -- Initialization should have happened in ParseInventory already
+    -- Just set cur_npc_id here
+    cur_npc_id = npc_id
+    return true
+end
+
+
+
+-- ### ITEM REVEAL (Two-stage for loading icon mode)
+
+-- Stage 1: Hidden -> Silhouette (for loading icon mode)
+function reveal_silhouette(npc_id, item_id)
+    if not corpses[npc_id] then return true end
+    if corpses[npc_id][item_id] ~= "hidden" then return true end
+    
+    pr(">>> Silhouette revealed for item %d", item_id)
+    
+    corpses[npc_id][item_id] = "silhouette"
+    
+    -- Refresh inventory to show the silhouette
+    local gui = ui_inventory.GUI
+    if gui and actor_menu.get_last_mode() == 4 then
+        gui:UpdateInventories()
+    end
+    
+    return true
+end
+
+-- Stage 2 (or single stage): Silhouette/Hidden -> Fully Revealed
+function reveal_item(npc_id, item_id)
+    if not corpses[npc_id] then return true end
+    local state = corpses[npc_id][item_id]
+    if not state then return true end  -- Already revealed
+    
+    pr(">>> Fully revealed item %d (was: %s)", item_id, tostring(state))
+    
+    play_found_sound(item_id)
+    corpses[npc_id][item_id] = false
+    
+    -- Remove loading spinner if present
+    remove_spinner(item_id)
+    
+    -- Check if all items are now revealed
+    local all_revealed = true
+    for id, st in pairs(corpses[npc_id]) do
+        if st == "hidden" or st == "silhouette" then
+            all_revealed = false
+            break
+        end
+    end
+    
+    -- If all items revealed, clear position cache to allow normal sorting
+    if all_revealed and item_positions[npc_id] and not presort_grid then
+        pr(">>> All items revealed for %d, clearing position cache (Magazines Redux can now sort freely)", npc_id)
+        item_positions[npc_id] = nil
+    end
+    
+    -- Restore cell color if in placeholder mode
+    local gui = ui_inventory.GUI
+    if gui and placeholder_mode > 0 then
+        local cc = gui.CC and gui.CC["npc_bag"]
+        if cc then
+            local ci = cc:GetCell_ID(item_id)
+            if ci and ci.ico then
+                ci.ico:SetTextureColor(GetARGB(255, 255, 255, 255))
+            end
+        end
+    end
+    
+    -- Refresh inventory
+    if gui and actor_menu.get_last_mode() == 4 then
+        if placeholder_mode == 0 then
+            if zzz_rax_sortingplus_mcm and zzz_rax_sortingplus_mcm.NPCINV then
+                gui.CC["npc_bag"]:Reset()
+            end
+        end
+        gui:UpdateInventories()
+    end
+    
+    return true
+end
+
+
+
+-- ### PLACEHOLDER VISUALS (Silhouettes and Loading Icons)
+
+local function update_silhouette_color_cache()
+    -- Calculate color based on intensity and base color
+    -- At 100% intensity: color is close to base color (dark)
+    -- At 50% intensity: color is brighter (towards white)
+    local brightness = (100 - silhouette_intensity) / 100
+    local r = math.floor(silhouette_color_r + (255 - silhouette_color_r) * brightness)
+    local g = math.floor(silhouette_color_g + (255 - silhouette_color_g) * brightness)
+    local b = math.floor(silhouette_color_b + (255 - silhouette_color_b) * brightness)
+    cached_sil_r = math.max(0, math.min(255, r))
+    cached_sil_g = math.max(0, math.min(255, g))
+    cached_sil_b = math.max(0, math.min(255, b))
+end
+
+local function get_silhouette_color()
+    -- Return cached values (updated on settings change)
+    if not cached_sil_r then
+        update_silhouette_color_cache()
+    end
+    return cached_sil_r, cached_sil_g, cached_sil_b
+end
+
+
+
+-- ### LOOT-BODY SORT LOCK
+--
+-- Every inventory sort mod in the stack (Seamless, Antifreeze, the sea-ex lag
+-- reducer, SortingPlus) only re-packs a container whose sort_method is "kind"
+--
+-- Sooo while we own a loot body and pre-sort is on we flip npc_bag to "sizekind", so
+-- all of them leave its layout alone and placement is ours via FindFreeCell
+local function unlock_npc_sort(cc)
+    if not npc_sort_locked then return end
+    if cc then cc.sort_method = saved_npc_sort_method end
+    npc_sort_locked = false
+    saved_npc_sort_method = nil
+end
+
+local function lock_npc_sort(cc)
+    if not cc then return end
+
+    local do_presort = presort_grid
+    if ui_mcm and ui_mcm.get then
+        local v = ui_mcm.get("loot_searching/presort_grid")
+        if v ~= nil then do_presort = v end
+    end
+
+    -- pre-sort off: hand the body back to the other sort mods
+    if not do_presort then
+        unlock_npc_sort(cc)
+        return
+    end
+
+    if not npc_sort_locked then
+        saved_npc_sort_method = cc.sort_method
+        npc_sort_locked = true
+    end
+    cc.sort_method = "sizekind"
+end
+
+
+
+-- ### PARSEINVENTORY OVERRIDE
+
+local basePI = ui_inventory.UIInventory.ParseInventory
+
+function ui_inventory.UIInventory:ParseInventory(npc, all, id_list, ignore_kind)
+    local inv = basePI(self, npc, all, id_list, ignore_kind)
+    
+    if self.mode ~= "loot" then return inv end
+    if not self:IsInvOwner(npc) then return inv end
+    if not is_valid_target(npc) then return inv end
+    
+    local npc_id = npc:id()
+    if npc_id == AC_ID then return inv end
+    
+    -- Set cur_npc_id IMMEDIATELY so FindFreeCell knows which corpse we're working with
+    cur_npc_id = npc_id
+
+    -- Runs on every loot refresh, before the bag is sorted/placed:
+    -- keep this body off "kind" sort so the other inventory sort mods stay off it
+    lock_npc_sort(self.CC and self.CC["npc_bag"])
+
+    -- Initialize corpse/container immediately if not done yet (prevents flash)
+    if not initial_inv[npc_id] then
+        local is_container = IsInvbox(npc)
+        pr("=== Immediate init %s %d (placeholder_mode=%d) ===", 
+           is_container and "container" or "corpse", npc_id, placeholder_mode)
+        
+        initial_inv[npc_id] = {}
+        corpses[npc_id] = {}
+        corpse_rank[npc_id] = is_container and 1.0 or get_rank_multiplier(npc)
+        search_init_tick[npc_id] = time_global()
+        
+        -- Get Haruka's Skills multiplier (and log status)
+        local haruka_mult, haruka_detected, haruka_level, haruka_max = get_haruka_scavenging_multiplier()
+        if haruka_detected then
+            pr("  Haruka's Skills: DETECTED (Scavenging level " .. haruka_level .. "/" .. haruka_max .. ", multiplier x" .. string.format("%.2f", haruka_mult) .. ")")
+        else
+            pr("  Haruka's Skills: NOT DETECTED")
+        end
+        
+        -- Always calculate positions (needed for reveal order, grid reset handled inside if presort enabled)
+        calculate_positions(npc_id, npc)
+        
+        local function record_item(_, obj)
+            initial_inv[npc_id][obj:id()] = true
+        end
+        npc:iterate_inventory(record_item, npc)
+        npc:iterate_ruck(record_item, npc)  -- Also check ruck/backpack
+        
+        local order = item_reveal_order[npc_id]
+        
+        if placeholder_mode == 2 then
+            -- Loading icon mode: two-stage reveal
+            local total_items = #order
+            local rmult = corpse_rank[npc_id] or 1.0
+            
+            -- Determine effective max time based on item count (apply Haruka's Skills bonus)
+            local effective_max = time_max * rmult * haruka_mult
+            if total_items <= 2 then
+                effective_max = math.min(effective_max, 3.0 * haruka_mult)
+            elseif total_items <= 5 then
+                effective_max = math.min(effective_max, 7.0 * haruka_mult)
+            end
+            
+            -- Track cumulative silhouette time
+            local cumulative_time = first_item_delay * haruka_mult
+            
+            -- OPTION 2: Track last reveal time to enforce minimum interval
+            local last_reveal_time = 0
+            
+            for i, item_id in ipairs(order) do
+                corpses[npc_id][item_id] = "hidden"
+                
+                -- Add random appear time for this item's silhouette (scaled by Haruka's Skills)
+                local appear_time = silhouette_appear_min + math.random() * (silhouette_appear_max - silhouette_appear_min)
+                appear_time = appear_time * haruka_mult
+                cumulative_time = cumulative_time + appear_time
+                
+                -- Apply rank multiplier
+                local silhouette_time = cumulative_time * rmult
+                
+                -- Cap silhouette time (use max delay for safety margin)
+                silhouette_time = math.min(silhouette_time, effective_max - delay_between_max * haruka_mult * 0.5)
+                silhouette_time = math.max(silhouette_time, 0.1)
+                
+                -- Reveal time is silhouette time + random delay (scaled by Haruka's Skills)
+                local reveal_time = silhouette_time + get_random_delay() * haruka_mult
+                reveal_time = math.min(reveal_time, effective_max)
+                
+                -- OPTION 2: Enforce minimum interval between reveals
+                if reveal_time < last_reveal_time + min_reveal_interval then
+                    reveal_time = last_reveal_time + min_reveal_interval
+                end
+                last_reveal_time = reveal_time
+                
+                CreateTimeEvent("item_silhouette", "silhouette_" .. npc_id .. "_" .. item_id,
+                                silhouette_time, reveal_silhouette, npc_id, item_id)
+                CreateTimeEvent("item_hiding", "item_hiding_" .. npc_id .. "_" .. item_id,
+                                reveal_time, reveal_item, npc_id, item_id)
+            end
+        else
+            -- Normal mode (mode 0 or 1): single-stage reveal
+            local total_items = #order
+            local last_reveal_time = 0  -- OPTION 2: Track last reveal time
+            for i, item_id in ipairs(order) do
+                -- Mode 1 (silhouettes): start as "silhouette" so items show immediately with dark effect
+                -- Mode 0 (no placeholder): start as "hidden" so items are filtered out
+                corpses[npc_id][item_id] = (placeholder_mode == 1) and "silhouette" or "hidden"
+                local search_time = calc_search_time(i, npc_id, total_items)
+                
+                -- OPTION 2: Enforce minimum interval between reveals
+                if search_time < last_reveal_time + min_reveal_interval then
+                    search_time = last_reveal_time + min_reveal_interval
+                end
+                last_reveal_time = search_time
+                
+                CreateTimeEvent("item_hiding", "item_hiding_" .. npc_id .. "_" .. item_id,
+                                search_time, reveal_item, npc_id, item_id)
+            end
+        end
+        
+        cur_npc_id = npc_id
+    else
+        -- Reopening - check if there are still hidden items that need time events
+        -- Only do this once per session (ParseInventory may be called multiple times)
+        if corpses[npc_id] and not resumed_search[npc_id] then
+            local hidden_count = 0
+            local silhouette_count = 0
+            
+            for item_id, state in pairs(corpses[npc_id]) do
+                if state == "hidden" then
+                    hidden_count = hidden_count + 1
+                elseif state == "silhouette" then
+                    silhouette_count = silhouette_count + 1
+                end
+            end
+            
+            if hidden_count > 0 or silhouette_count > 0 then
+                pr("=== Resuming search for %d (hidden=%d, silhouette=%d) ===", 
+                   npc_id, hidden_count, silhouette_count)
+                
+                resumed_search[npc_id] = true  -- Mark as resumed
+                
+                -- Get Haruka's Skills multiplier for resumed search
+                local haruka_mult, haruka_detected, haruka_level, haruka_max = get_haruka_scavenging_multiplier()
+                if haruka_detected then
+                    pr("  Haruka's Skills: DETECTED (Scavenging level " .. haruka_level .. "/" .. haruka_max .. ", multiplier x" .. string.format("%.2f", haruka_mult) .. ")")
+                end
+                
+                -- Recreate time events for remaining items
+                local remaining_items = hidden_count + silhouette_count
+                local rmult = corpse_rank[npc_id] or 1.0
+                
+                -- Determine effective max time (with Haruka's Skills bonus)
+                local effective_max = time_max * rmult * haruka_mult
+                if remaining_items <= 2 then
+                    effective_max = math.min(effective_max, 3.0 * haruka_mult)
+                elseif remaining_items <= 5 then
+                    effective_max = math.min(effective_max, 7.0 * haruka_mult)
+                end
+                
+                -- Track cumulative time for hidden items
+                local cumulative_time = first_item_delay * haruka_mult
+                
+                -- OPTION 2: Track last reveal time to enforce minimum interval
+                local last_reveal_time = 0
+                
+                for item_id, state in pairs(corpses[npc_id]) do
+                    if state == "hidden" then
+                        if placeholder_mode == 2 then
+                            -- Two-stage: schedule silhouette then reveal (with Haruka's Skills bonus)
+                            local appear_time = silhouette_appear_min + math.random() * (silhouette_appear_max - silhouette_appear_min)
+                            appear_time = appear_time * haruka_mult
+                            cumulative_time = cumulative_time + appear_time
+                            
+                            local silhouette_time = math.min(cumulative_time * rmult, effective_max - delay_between_max * haruka_mult * 0.5)
+                            silhouette_time = math.max(silhouette_time, 0.1)
+                            
+                            local reveal_time = math.min(silhouette_time + get_random_delay() * haruka_mult, effective_max)
+                            
+                            -- OPTION 2: Enforce minimum interval between reveals
+                            if reveal_time < last_reveal_time + min_reveal_interval then
+                                reveal_time = last_reveal_time + min_reveal_interval
+                            end
+                            last_reveal_time = reveal_time
+                            
+                            CreateTimeEvent("item_silhouette", "silhouette_" .. npc_id .. "_" .. item_id,
+                                            silhouette_time, reveal_silhouette, npc_id, item_id)
+                            CreateTimeEvent("item_hiding", "item_hiding_" .. npc_id .. "_" .. item_id,
+                                            reveal_time, reveal_item, npc_id, item_id)
+                        else
+                            -- Single-stage: use calc_search_time
+                            local search_time = calc_search_time(remaining_items, npc_id, remaining_items)
+                            
+                            -- OPTION 2: Enforce minimum interval between reveals
+                            if search_time < last_reveal_time + min_reveal_interval then
+                                search_time = last_reveal_time + min_reveal_interval
+                            end
+                            last_reveal_time = search_time
+                            
+                            CreateTimeEvent("item_hiding", "item_hiding_" .. npc_id .. "_" .. item_id,
+                                            search_time, reveal_item, npc_id, item_id)
+                        end
+                    elseif state == "silhouette" then
+                        -- Already silhouette, just schedule reveal with random delay (with Haruka's Skills bonus)
+                        local reveal_time = math.min(get_random_delay() * haruka_mult, effective_max)
+                        
+                        -- OPTION 2: Enforce minimum interval between reveals
+                        if reveal_time < last_reveal_time + min_reveal_interval then
+                            reveal_time = last_reveal_time + min_reveal_interval
+                        end
+                        last_reveal_time = reveal_time
+                        
+                        CreateTimeEvent("item_hiding", "item_hiding_" .. npc_id .. "_" .. item_id,
+                                        reveal_time, reveal_item, npc_id, item_id)
+                    end
+                end
+            end
+        end
+        
+        cur_npc_id = npc_id
+    end
+    
+    -- Detect dynamically spawned items (e.g., from Haruka's Scavenging skill bonus)
+    -- These items appear AFTER initial tracking, so we need to add them with reveal timers
+    if initial_inv[npc_id] and corpses[npc_id] then
+        local new_items = {}
+        local function check_new(_, obj)
+            local item_id = obj:id()
+            -- Item exists but not in our tracking = dynamically spawned
+            if not initial_inv[npc_id][item_id] and not corpses[npc_id][item_id] then
+                table.insert(new_items, { id = item_id, obj = obj })
+            end
+        end
+        npc:iterate_inventory(check_new, npc)
+
+        -- Split post-open arrivals
+        if #new_items > 0 then
+            local tick = search_init_tick[npc_id]
+            local treat_as_search = (haru_skills ~= nil) and tick
+                and (time_global() - tick < NEW_ITEM_SPINNER_WINDOW)
+            if not treat_as_search then
+                for _, item_data in ipairs(new_items) do
+                    initial_inv[npc_id][item_data.id] = true
+                end
+                new_items = {}
+            end
+        end
+
+        if #new_items > 0 then
+            pr("=== Detected %d Haruka bonus items ===", #new_items)
+            
+            -- Get Haruka's Skills multiplier for timing
+            local haruka_mult = get_haruka_scavenging_multiplier()
+            local rmult = corpse_rank[npc_id] or 1.0
+            
+            -- Check if presort is enabled - need to calculate positions for new items
+            local do_presort = presort_grid
+            if ui_mcm and ui_mcm.get then
+                local mcm_val = ui_mcm.get("loot_searching/presort_grid")
+                if mcm_val ~= nil then
+                    do_presort = mcm_val
+                end
+            end
+            
+            -- If presort enabled, we need to find free positions for new items
+            if do_presort and item_positions[npc_id] then
+                local gui = ui_inventory.GUI
+                local cols = 10
+                if gui and gui.CC and gui.CC["npc_bag"] and gui.CC["npc_bag"].cols then
+                    cols = gui.CC["npc_bag"].cols
+                end
+                
+                -- Rebuild grid state from existing positions
+                local grid = {}
+                for r = 1, 100 do
+                    grid[r] = {}
+                    for c = 1, cols do
+                        grid[r][c] = true
+                    end
+                end
+                
+                -- Mark cells taken by existing items
+                for _, pos in pairs(item_positions[npc_id]) do
+                    for r = pos.row, pos.row + pos.h - 1 do
+                        for c = pos.col, pos.col + pos.w - 1 do
+                            if grid[r] then
+                                grid[r][c] = false
+                            end
+                        end
+                    end
+                end
+                
+                -- Helper functions for finding free space
+                local function is_free(row, col, w, h)
+                    if col + w - 1 > cols then return false end
+                    for r = row, row + h - 1 do
+                        if not grid[r] then return false end
+                        for c = col, col + w - 1 do
+                            if not grid[r][c] then return false end
+                        end
+                    end
+                    return true
+                end
+                
+                local function take(row, col, w, h)
+                    for r = row, row + h - 1 do
+                        for c = col, col + w - 1 do
+                            if grid[r] then
+                                grid[r][c] = false
+                            end
+                        end
+                    end
+                end
+                
+                local function find_free(w, h)
+                    for row = 1, 100 do
+                        for col = 1, cols - w + 1 do
+                            if is_free(row, col, w, h) then
+                                return row, col
+                            end
+                        end
+                    end
+                    return 1, 1  -- Fallback
+                end
+                
+                -- Calculate positions for new items
+                for _, item_data in ipairs(new_items) do
+                    local item_id = item_data.id
+                    local obj = item_data.obj
+                    local sec = obj:section()
+                    local w, h = get_sort_info(sec)
+                    
+                    local row, col = find_free(w, h)
+                    take(row, col, w, h)
+                    item_positions[npc_id][item_id] = { row = row, col = col, w = w, h = h }
+                    pr("  Position for new item %d: row=%d, col=%d, size=%dx%d", item_id, row, col, w, h)
+                end
+            end
+            
+            for _, item_data in ipairs(new_items) do
+                local item_id = item_data.id
+                local obj = item_data.obj
+                local sec = obj:section()
+                
+                -- Add to tracking
+                initial_inv[npc_id][item_id] = true
+                
+                -- Calculate reveal time (shorter delay for bonus items)
+                local reveal_time = (0.5 + math.random() * 2.0) * rmult * haruka_mult
+                
+                if placeholder_mode == 2 then
+                    -- Two-stage: show silhouette quickly, then reveal
+                    corpses[npc_id][item_id] = "hidden"
+                    local silhouette_time = 0.1 + math.random() * 0.3
+                    CreateTimeEvent("item_silhouette", "silhouette_" .. npc_id .. "_" .. item_id,
+                                    silhouette_time, reveal_silhouette, npc_id, item_id)
+                    CreateTimeEvent("item_hiding", "item_hiding_" .. npc_id .. "_" .. item_id,
+                                    reveal_time, reveal_item, npc_id, item_id)
+                elseif placeholder_mode == 1 then
+                    -- Silhouette mode: start as silhouette
+                    corpses[npc_id][item_id] = "silhouette"
+                    CreateTimeEvent("item_hiding", "item_hiding_" .. npc_id .. "_" .. item_id,
+                                    reveal_time, reveal_item, npc_id, item_id)
+                else
+                    -- No placeholder: start hidden
+                    corpses[npc_id][item_id] = "hidden"
+                    CreateTimeEvent("item_hiding", "item_hiding_" .. npc_id .. "_" .. item_id,
+                                    reveal_time, reveal_item, npc_id, item_id)
+                end
+                
+                pr("  New item: %d (%s) -> reveal in %.2fs", item_id, sec, reveal_time)
+            end
+        end
+    end
+    
+    -- Dark silhouettes mode: show "silhouette" items (visuals applied in Update)
+    -- Filter out any "hidden" items (shouldn't exist in mode 1, but be safe)
+    if placeholder_mode == 1 then
+        if id_list then
+            for item_id, _ in pairs(inv) do
+                local state = corpses[npc_id] and corpses[npc_id][item_id]
+                if state == "hidden" then
+                    inv[item_id] = nil
+                end
+            end
+        else
+            local filtered = {}
+            local idx = 1
+            for k, obj in pairs(inv) do
+                if obj and type(obj.id) == "function" then
+                    local item_id = obj:id()
+                    local state = corpses[npc_id] and corpses[npc_id][item_id]
+                    if state ~= "hidden" then
+                        filtered[idx] = obj
+                        idx = idx + 1
+                    end
+                end
+            end
+            inv = filtered
+        end
+        return inv
+    end
+    
+    -- Loading icon mode: filter "hidden" items, show "silhouette" and revealed
+    -- Visuals applied in Update
+    if placeholder_mode == 2 then
+        local filtered = {}
+        local idx = 1
+        if id_list then
+            for item_id, val in pairs(inv) do
+                local state = corpses[npc_id] and corpses[npc_id][item_id]
+                if state ~= "hidden" then
+                    filtered[item_id] = val
+                end
+            end
+        else
+            for k, obj in pairs(inv) do
+                if obj and type(obj.id) == "function" then
+                    local item_id = obj:id()
+                    local state = corpses[npc_id] and corpses[npc_id][item_id]
+                    if state ~= "hidden" then
+                        filtered[idx] = obj
+                        idx = idx + 1
+                    end
+                end
+            end
+        end
+        inv = filtered
+        return inv
+    end
+    
+    -- No placeholder mode: filter all hidden items
+    if id_list then
+        for item_id, _ in pairs(inv) do
+            local state = corpses[npc_id] and corpses[npc_id][item_id]
+            if state == "hidden" or state == "silhouette" then
+                inv[item_id] = nil
+            end
+        end
+    else
+        local filtered = {}
+        local idx = 1
+        for k, obj in pairs(inv) do
+            if obj and type(obj.id) == "function" then
+                local item_id = obj:id()
+                local state = corpses[npc_id] and corpses[npc_id][item_id]
+                if state ~= "hidden" and state ~= "silhouette" then
+                    filtered[idx] = obj
+                    idx = idx + 1
+                end
+            end
+        end
+        inv = filtered
+    end
+    
+    return inv
+end
+
+
+
+-- ### FINDFREECELL OVERRIDE
+
+local baseFindFreeCell = utils_ui.UICellContainer.FindFreeCell
+
+function utils_ui.UICellContainer:FindFreeCell(obj, sec)
+    if self.ID ~= "npc_bag" then
+        return baseFindFreeCell(self, obj, sec)
+    end
+    
+    -- Read presort_grid directly from MCM for immediate effect
+    local do_presort = presort_grid
+    if ui_mcm and ui_mcm.get then
+        local mcm_val = ui_mcm.get("loot_searching/presort_grid")
+        if mcm_val ~= nil then
+            do_presort = mcm_val
+        end
+    end
+    
+    -- Skip pre-sorting if disabled
+    if not do_presort then
+        return baseFindFreeCell(self, obj, sec)
+    end
+    
+    local item_id = obj and obj:id()
+    if not item_id or not cur_npc_id then
+        return baseFindFreeCell(self, obj, sec)
+    end
+    
+    local pos = item_positions[cur_npc_id] and item_positions[cur_npc_id][item_id]
+    if not pos then
+        return baseFindFreeCell(self, obj, sec)
+    end
+    
+    while #self.grid < pos.row + pos.h - 1 do
+        self:Grow()
+    end
+
+    if pos.col + pos.w - 1 <= self.cols and self:IsFreeRoom(pos.row, pos.col, pos.w, pos.h) then
+        return self:TakeRoom(pos.row, pos.col, pos.w, pos.h)
+    end
+
+    return baseFindFreeCell(self, obj, sec)
+end
+
+
+
+-- ### BLOCK INTERACTION WITH HIDDEN ITEMS
+
+-- Block highlight on hover
+local base_UICellItem_Highlight = utils_ui.UICellItem.Highlight
+function utils_ui.UICellItem:Highlight(state)
+    if cur_npc_id and self.ID then
+        local item_id = tonumber(self.ID)
+        if item_id and is_item_hidden(cur_npc_id, item_id) then
+            if self.hl then
+                self.hl:Show(false)
+            end
+            return
+        end
+    end
+    return base_UICellItem_Highlight(self, state)
+end
+
+-- Block item info tooltip display AND apply placeholder visuals
+local base_UICellContainer_Update = utils_ui.UICellContainer.Update
+function utils_ui.UICellContainer:Update(item_info, no_info, hide)
+    -- Only intercept for npc_bag
+    if self.ID == "npc_bag" and cur_npc_id then
+        -- Apply placeholder visuals immediately to prevent flash
+        if placeholder_mode > 0 and corpses[cur_npc_id] then
+            local sil_r, sil_g, sil_b = get_silhouette_color()
+            
+            for i = 1, #self.cell do
+                local ci = self.cell[i]
+                if ci and ci.ico then
+                    local item_id = ci.ID and tonumber(ci.ID)
+                    if item_id then
+                        local state = corpses[cur_npc_id][item_id]
+                        if state == "hidden" or state == "silhouette" then
+                            -- Apply silhouette color
+                            local alpha = (state == "silhouette") and 220 or 255
+                            ci.ico:SetTextureColor(GetARGB(alpha, sil_r, sil_g, sil_b))
+                            
+                            -- Create spinner for silhouette items (loading icon mode)
+                            -- n step its atlas frame
+                            if placeholder_mode == 2 and state == "silhouette" then
+                                create_spinner_for_cell(item_id, ci)
+                                local sp = loading_spinners[item_id]
+                                if sp then
+                                    set_frame(sp, spinner_atlas_meta, atlas_frame(spinner_atlas_meta))
+                                end
+                            end
+                        elseif state == false then
+                            -- Revealed - ensure full color
+                            ci.ico:SetTextureColor(GetARGB(255, 255, 255, 255))
+                            remove_spinner(item_id)
+                        end
+                    end
+                end
+            end
+        end
+        
+        -- Check if cursor is over a hidden item
+        if self:IsCursorOverWindow() then
+            for i = 1, #self.cell do
+                local ci = self.cell[i]
+                if ci and ci:IsCursorOverWindow() and ci:IsShown() then
+                    local item_id = ci.ID and tonumber(ci.ID)
+                    if item_id and is_item_hidden(cur_npc_id, item_id) then
+                        -- Don't show item info for hidden items
+                        if item_info then
+                            item_info:Update()  -- Clear info
+                        end
+                        return false
+                    end
+                end
+            end
+        end
+    end
+    return base_UICellContainer_Update(self, item_info, no_info, hide)
+end
+
+-- Block mouse clicks on hidden items
+local base_On_CC_Mouse1 = ui_inventory.UIInventory.On_CC_Mouse1
+function ui_inventory.UIInventory:On_CC_Mouse1(bag, idx)
+    if bag == "npc_bag" and cur_npc_id then
+        local cc = self.CC and self.CC[bag]
+        if cc then
+            local ci = cc.cell and cc.cell[idx]
+            if ci then
+                local item_id = ci.ID and tonumber(ci.ID)
+                if item_id and is_item_hidden(cur_npc_id, item_id) then
+                    pr("Blocked click on hidden item %d", item_id)
+                    return
+                end
+            end
+        end
+    end
+    return base_On_CC_Mouse1(self, bag, idx)
+end
+
+-- Block double-click on hidden items
+local base_On_CC_Mouse1_DB = ui_inventory.UIInventory.On_CC_Mouse1_DB
+function ui_inventory.UIInventory:On_CC_Mouse1_DB(bag, idx)
+    if bag == "npc_bag" and cur_npc_id then
+        local cc = self.CC and self.CC[bag]
+        if cc then
+            local ci = cc.cell and cc.cell[idx]
+            if ci then
+                local item_id = ci.ID and tonumber(ci.ID)
+                if item_id and is_item_hidden(cur_npc_id, item_id) then
+                    pr("Blocked double-click on hidden item %d", item_id)
+                    return
+                end
+            end
+        end
+    end
+    return base_On_CC_Mouse1_DB(self, bag, idx)
+end
+
+-- Block right-click context menu on hidden items
+local base_On_CC_Mouse2 = ui_inventory.UIInventory.On_CC_Mouse2
+function ui_inventory.UIInventory:On_CC_Mouse2(bag, idx)
+    if bag == "npc_bag" and cur_npc_id then
+        local cc = self.CC and self.CC[bag]
+        if cc then
+            local ci = cc.cell and cc.cell[idx]
+            if ci then
+                local item_id = ci.ID and tonumber(ci.ID)
+                if item_id and is_item_hidden(cur_npc_id, item_id) then
+                    pr("Blocked right-click on hidden item %d", item_id)
+                    return
+                end
+            end
+        end
+    end
+    return base_On_CC_Mouse2(self, bag, idx)
+end
+
+-- Block drag & drop of hidden items
+local base_On_CC_DragDrop = ui_inventory.UIInventory.On_CC_DragDrop
+function ui_inventory.UIInventory:On_CC_DragDrop(bag_from, idx_from)
+    if bag_from == "npc_bag" and cur_npc_id then
+        local cc = self.CC and self.CC[bag_from]
+        if cc then
+            local ci = cc.cell and cc.cell[idx_from]
+            if ci then
+                local item_id = ci.ID and tonumber(ci.ID)
+                if item_id and is_item_hidden(cur_npc_id, item_id) then
+                    pr("Blocked drag of hidden item %d", item_id)
+                    return
+                end
+            end
+        end
+    end
+    return base_On_CC_DragDrop(self, bag_from, idx_from)
+end
+
+
+
+-- ### HUD INDICATOR
+
+local current_hud_icon = nil
+local current_indicator_style = nil
+local current_indicator_x = nil
+local current_indicator_y = nil
+local current_indicator_scale = nil
+local current_text_x = nil
+local current_text_y = nil
+
+function ui_inventory.UIInventory:InitIconX()
+    -- Reuse cached XML parser (same file as spinners)
+    local xml = get_spinner_xml()
+    
+    current_hud_icon = hud_icon
+    current_indicator_style = hud_indicator_style
+    current_indicator_x = hud_indicator_x
+    current_indicator_y = hud_indicator_y
+    current_indicator_scale = hud_indicator_scale
+    current_text_x = hud_text_x
+    current_text_y = hud_text_y
+    
+    if hud_icon == 1 then
+        self.loot_icon_x = xml:InitTextWnd("looting_text", self)
+        self.loot_icon_x:SetText(get_looting_text())
+        -- Set position from MCM settings
+        self.loot_icon_x:SetWndPos(vector2():set(hud_text_x, hud_text_y))
+    elseif hud_icon == 2 then
+        self.loot_icon_x = xml:InitStatic("loot_indicator_anim", self)
+        -- Set atlas texture based on selected style, then point at frame 0
+        local texture_path = "ui\\loot_indicator\\" .. hud_indicator_style .. "\\indicator_atlas"
+        self.loot_icon_x:InitTexture(texture_path)
+        set_frame(self.loot_icon_x, indicator_atlas_meta, atlas_frame(indicator_atlas_meta))
+        self.loot_icon_x:SetStretchTexture(true)
+        -- Set position from MCM settings
+        self.loot_icon_x:SetWndPos(vector2():set(hud_indicator_x, hud_indicator_y))
+        -- Apply scale (base size is 140x21)
+        local scale = hud_indicator_scale / 100
+        local w = 140 * scale
+        local h = 21 * scale
+        self.loot_icon_x:SetWndSize(vector2():set(w, h))
+    end
+end
+
+function ui_inventory.UIInventory:ReinitIconX()
+    -- Destroy old indicator
+    if self.loot_icon_x then
+        self.loot_icon_x:Show(false)
+        self.loot_icon_x = nil
+    end
+    -- Recreate with new settings
+    self:InitIconX()
+end
+
+local baseUpdateInfo = ui_inventory.UIInventory.UpdateInfo
+function ui_inventory.UIInventory:UpdateInfo(go)
+    self:LootUpdateX()
+    baseUpdateInfo(self, go)
+end
+
+local hud_tmr
+local snd_tmr = 0
+local dots = 0
+
+-- Generate animated "Searching . . ." text (moved outside for performance)
+local function dots_str()
+    local str = get_looting_text()
+    dots = dots < 5 and dots + 1 or 1
+    for i = 1, dots do
+        str = str .. " ."
+    end
+    return str
+end
+
+function ui_inventory.UIInventory:LootUpdateX()
+    local tg = time_global()
+    if (hud_tmr and tg < hud_tmr) then return end
+    hud_tmr = tg + 500
+    
+    -- Check if settings changed and reinitialize if needed
+    if self.loot_icon_x then
+        local needs_reinit = current_hud_icon ~= hud_icon
+        if hud_icon == 1 then
+            needs_reinit = needs_reinit or current_text_x ~= hud_text_x
+            needs_reinit = needs_reinit or current_text_y ~= hud_text_y
+        elseif hud_icon == 2 then
+            needs_reinit = needs_reinit or current_indicator_style ~= hud_indicator_style
+            needs_reinit = needs_reinit or current_indicator_x ~= hud_indicator_x
+            needs_reinit = needs_reinit or current_indicator_y ~= hud_indicator_y
+            needs_reinit = needs_reinit or current_indicator_scale ~= hud_indicator_scale
+        end
+        if needs_reinit then
+            self:ReinitIconX()
+        end
+    end
+    
+    if not self.loot_icon_x then
+        self:InitIconX()
+    end
+    
+    if not cur_npc_id then
+        self.loot_icon_x:Show(false)
+        return
+    end
+    
+    if not hud_enable then
+        self.loot_icon_x:Show(false)
+        return
+    end
+    
+    -- Count hidden items directly from cur_npc_id table (performance fix)
+    local itms = 0
+    local npc_corpse = corpses[cur_npc_id]
+    if npc_corpse then
+        for item_id, val in pairs(npc_corpse) do
+            if val then
+                itms = itms + 1
+            end
+        end
+    end
+    
+    if itms <= 0 then
+        self.loot_icon_x:Show(false)
+        return
+    end
+    
+    -- looting sound
+    if sound_bg_enable and tg > snd_tmr then
+        local snd_file = "looting\\looting_" .. math.random(1, 12)
+        local snd = sound_object(snd_file)
+        if snd then
+            snd_tmr = tg + snd:length() * 0.5
+            snd:play_at_pos(db.actor, VEC_ZERO, 0, sound_object.s2d)
+            snd.volume = snd.volume * sound_bg_enable_vol
+        end
+    end
+    
+    self.loot_icon_x:Show(true)
+    if hud_icon == 1 then
+        self.loot_icon_x:SetText(dots_str())
+    end
+end
+
+
+
+-- ### CALLBACKS
+
+function GUI_on_show(name)
+    if name ~= "UIInventory" then return end
+    CreateTimeEvent("init_inv_ev", "init_inv_ac", 0, save_initial_inv)
+end
+
+function GUI_on_hide(name)
+    if name ~= "UIInventory" then return end
+    
+    local inventory = ui_inventory.GUI
+    if not inventory then return end
+
+    -- Give npc_bag's sort method back before any early-out below
+    unlock_npc_sort(inventory.CC and inventory.CC["npc_bag"])
+
+    if inventory.mode ~= "loot" then return end
+
+    -- Cleanup spinners
+    cleanup_all_spinners()
+    
+    -- Remove time events but DON'T change item states
+    -- Items will remain in hidden/silhouette state until reopened
+    for npc_id, t in pairs(corpses) do
+        -- Clear resumed flag so search can be resumed next time
+        resumed_search[npc_id] = nil
+        
+        for item_id, state in pairs(t) do
+            if state == "hidden" or state == "silhouette" then
+                RemoveTimeEvent("item_silhouette", "silhouette_" .. npc_id .. "_" .. item_id)
+                RemoveTimeEvent("item_hiding", "item_hiding_" .. npc_id .. "_" .. item_id)
+                -- DON'T set to nil - keep the hidden/silhouette state
+            end
+        end
+    end
+    
+    cur_npc_id = nil
+end
+
+function server_entity_on_unregister(se_obj)
+    local id = se_obj.id
+    corpses[id] = nil
+    initial_inv[id] = nil
+    corpse_rank[id] = nil
+    item_positions[id] = nil
+    item_reveal_order[id] = nil
+    resumed_search[id] = nil
+    search_init_tick[id] = nil
+end
+
+function on_option_change()
+    load_settings()
+    -- Invalidate caches that depend on settings
+    update_silhouette_color_cache()
+
+    -- Apply/release the loot-body sort lock at once if pre-sort was toggled while
+    -- a loot window is open (otherwise it would wait for the next refresh)
+    if cur_npc_id then
+        local gui = ui_inventory.GUI
+        lock_npc_sort(gui and gui.CC and gui.CC["npc_bag"])
+    end
+end
+
+
+-- ### ITHEON AUTOLOOTER COMPATIBILITY
+
+-- Block autolooter during active looting to prevent it from accessing hidden items
+local function hook_autolooter()
+    -- Always log this check regardless of debug mode
+    printf("[LootTime] Checking for iTheon Autolooter: z_auto_looter=%s, auto_looter=%s, get_actor=%s",
+        tostring(z_auto_looter ~= nil),
+        tostring(z_auto_looter and z_auto_looter.auto_looter ~= nil),
+        tostring(z_auto_looter and z_auto_looter.get_actor ~= nil))
+
+    if not z_auto_looter then return end
+    if not z_auto_looter.auto_looter then return end
+
+    printf("[LootTime] iTheon Autolooter detected, hooking get_actor + auto_looter")
+
+    -- True while this corpse/box still has unrevealed (hidden/silhouette) items
+    local function still_searching(target)
+        if not target then return false end
+        local t = corpses[target:id()]
+        if not t then return false end
+        for _, state in pairs(t) do
+            if state == "hidden" or state == "silhouette" then
+                return true
+            end
+        end
+        return false
+    end
+
+    local function blocked_tip()
+        if autolooter_show_blocked_msg then
+            news_manager.send_tip(db.actor, game.translate_string("st_looting_autolooter_blocked"), nil, nil, 3000)
+        end
+    end
+
+    -- KEY PATH! The looter key fires the auto_looter that was captured by
+    -- RegisterScriptCallback("on_key_press", auto_looter) at the looter's own
+    -- on_game_start
+    if z_auto_looter.get_actor then
+        local base_get_actor = z_auto_looter.get_actor
+        function z_auto_looter.get_actor()
+            local target = base_get_actor()
+            if still_searching(target) then
+                pr("  Blocking Autolooter (key) - still searching corpse %d", target:id())
+                blocked_tip()
+                return nil
+            end
+            return target
+        end
+    end
+
+    -- PROXIMITY PATH! z_auto_proximity_looter calls z_auto_looter.auto_looter(nil, obj)
+    -- through the table field, so wrapping the field intercepts that one
+    local base_auto_looter = z_auto_looter.auto_looter
+    function z_auto_looter.auto_looter(key, experimental_actor)
+        if experimental_actor and still_searching(experimental_actor) then
+            pr("  Blocking Autolooter (proximity) - still searching corpse %d", experimental_actor:id())
+            blocked_tip()
+            return
+        end
+        return base_auto_looter(key, experimental_actor)
+    end
+end
+
+-- Per-frame driver for the HUD indicator bar
+local function loot_anim_on_update()
+    if not cur_npc_id then return end
+    if not hud_enable or hud_icon ~= 2 then return end
+    local gui = ui_inventory.GUI
+    if not gui or not gui.loot_icon_x then return end
+    set_frame(gui.loot_icon_x, indicator_atlas_meta, atlas_frame(indicator_atlas_meta))
+end
+
+function on_game_start()
+    load_settings()
+    -- Initialize caches
+    update_silhouette_color_cache()
+
+    -- Hook compatible mods if installed
+    hook_autolooter()
+
+    RegisterScriptCallback("GUI_on_show", GUI_on_show)
+    RegisterScriptCallback("GUI_on_hide", GUI_on_hide)
+    RegisterScriptCallback("server_entity_on_unregister", server_entity_on_unregister)
+    RegisterScriptCallback("on_option_change", on_option_change)
+    RegisterScriptCallback("actor_on_update", loot_anim_on_update)
+end

@@ -1,0 +1,138 @@
+--[[
+    Repositions SortingPlus' favourite/junk mark icons for HD inventory icons.
+
+    SortingPlus (zzz_rax_sortingplus_mcm) computes the mark position from
+    utils_xml.get_item_axis(sec) without dividing by inv_grid_scale. HD icons
+    (HD_Inventory_Icons_Framework) double inv_grid_width/height and set
+    inv_grid_scale = 2, so the marks were drawn at twice the correct offset,
+    outside the icon and over its neighbours.
+
+    This wraps the original icon_junk/icon_favs functors: SortingPlus keeps
+    deciding *whether* a mark is shown (bag checks, fav/junk state, MCM
+    toggles); we only recompute the coordinates from the rendered icon size.
+      - junk mark: right edge, vertically centered
+      - favourite mark: left edge, vertically centered (original SortingPlus
+        layout, so an item marked as both shows both marks)
+
+    If SortingPlus, the HD framework, or the utils_xml patches are missing,
+    this script does nothing.
+
+    Named zzz_aaa_* so its on_game_start runs before zzz_rax_sortingplus_mcm's
+    (alphabetical order). SortingPlus registers the functors twice: once in its
+    on_game_start and once in loadsettings() at actor_on_first_update. Wrapping
+    after the first registration would leave one unwrapped copy in
+    rax_icon_layers, drawing a second mark at the old, unscaled position.
+]] --
+
+local DBG = false -- diagnostics, greppable as "FIXHD|" in the xray log
+
+local MARK = 15 -- mark icon size used by SortingPlus (w/h 15 in grid-50 space)
+
+local applied = false
+
+local function get_grid_scale(sec)
+    local io = aaa_rax_icon_override_mcm and aaa_rax_icon_override_mcm.icon_override
+    if io and io:section_exist(sec) then
+        return io:r_float_ex(sec, "inv_grid_scale") or 1
+    end
+    return SYS_GetParam(2, sec, "inv_grid_scale", 1) or 1
+end
+
+-- Rendered icon size in the grid-50 pixel space rax_icon_layers positions
+-- texture layers in (add_texture_layer rescales x/y by cell.grid_size/50).
+-- Cached per section: the functors run on every cell update, and grid dims,
+-- icon_override entries, and inv_grid_scale never change during a session.
+local math_ceil = math.ceil
+local dims_cache = {}
+
+local function rendered_dims(sec)
+    local cached = dims_cache[sec]
+    if cached then return cached[1], cached[2] end
+
+    if not (sec and utils_xml and utils_xml.get_item_axis) then return end
+
+    local ok, axis = pcall(utils_xml.get_item_axis, sec)
+    if not (ok and axis and axis.w) then return end
+
+    local w, h = axis.w, axis.h
+    local scale = get_grid_scale(sec)
+    if scale and scale > 0 and scale ~= 1 then
+        w = math_ceil(w / scale)
+        h = math_ceil(h / scale)
+    end
+    dims_cache[sec] = { w, h }
+    return w, h
+end
+
+-- Diagnostic (DBG only): log the area every class-level FindFreeCell call
+-- actually claims, no matter which mod's implementation answers it.
+local ffc_logged = false
+local function install_ffc_logger()
+    if ffc_logged or not (DBG and utils_ui and utils_ui.UICellContainer) then return end
+    ffc_logged = true
+
+    local base = utils_ui.UICellContainer.FindFreeCell
+    utils_ui.UICellContainer.FindFreeCell = function(self, obj, sec, ...)
+        local area = base(self, obj, sec, ...)
+        if area then
+            local s = sec or (obj and obj:section())
+            printf("FIXHD| classFFC [%s] cc=%s sort=%s -> x=%s y=%s w=%s h=%s",
+                tostring(s), tostring(self.ID), tostring(self.sort_method),
+                area.x, area.y, area.w, area.h)
+        end
+        return area
+    end
+end
+
+function on_game_start()
+    install_ffc_logger()
+
+    -- on_game_start fires on every game load while script state persists;
+    -- only wrap once per session.
+    if applied then return end
+
+    local sp = zzz_rax_sortingplus_mcm
+    if not sp then return end
+
+    -- Wrapping must happen before SortingPlus registers the functors with
+    -- rax_icon_layers, which it does later (actor_on_first_update /
+    -- on_option_change) by reading these module fields.
+    local orig_junk = sp.icon_junk
+    if type(orig_junk) == "function" then
+        sp.icon_junk = function(cell, obj, sec)
+            local tbl = orig_junk(cell, obj, sec)
+            if tbl then
+                local w, h = rendered_dims(sec)
+                if w then
+                    tbl.x = math.max(0, w - MARK)
+                    tbl.y = h / 2 - 7
+                end
+                if DBG then
+                    printf("FIXHD| mark junk [%s] x=%s y=%s rendered=%sx%s", sec, tbl.x, tbl.y, tostring(w), tostring(h))
+                end
+            end
+            return tbl
+        end
+    end
+
+    local orig_favs = sp.icon_favs
+    if type(orig_favs) == "function" then
+        sp.icon_favs = function(cell, obj, sec)
+            local tbl = orig_favs(cell, obj, sec)
+            if tbl then
+                local w, h = rendered_dims(sec)
+                if w then
+                    tbl.x = 0
+                    tbl.y = h / 2 - 11
+                end
+                if DBG then
+                    printf("FIXHD| mark fav [%s] x=%s y=%s rendered=%sx%s", sec, tbl.x, tbl.y, tostring(w), tostring(h))
+                end
+            end
+            return tbl
+        end
+    end
+
+    applied = true
+    if DBG then printf("FIXHD| mark functors wrapped") end
+end
