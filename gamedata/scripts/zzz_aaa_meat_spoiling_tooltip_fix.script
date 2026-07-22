@@ -1,0 +1,90 @@
+--[[
+    Fix HD Inventory Icon Position: restore the meat spoiling tooltip line
+    ("In-game Hours until Rotten: N hours") on raw/cooked meat.
+
+    Why this exists:
+      The spoiling-timer tooltip comes from ilrathCXV's "Meat Spoiling Timer
+      in Tooltips", via a ui_item.build_desc_footer override. HD_Inventory_Icons_
+      Framework ships its own meat_spoiling.script (it adds an HD icon-grid
+      scale tweak to the frozen-meat icon layer) and wins the load-order
+      conflict over ilrathCXV's copy. That copy dropped the build_desc_footer
+      override, so the tooltip silently disappears whenever the framework is
+      installed. Reordering can't fix it: the framework copy has to stay on top
+      for its icon-scale fix. This re-adds only the footer and leaves the
+      framework's spoilage mechanic untouched.
+
+    How it reads the timer:
+      The framework copy keeps its expiration_table file-local, so we can't
+      index it directly. Its public save_state(m_data) assigns that live table
+      into m_data (save_state only writes to the table it's handed, with no
+      other side effects), so we borrow the reference through it each time a
+      tooltip is built. Tooltip builds aren't a hot loop, and this is an O(1) grab.
+
+    Footer layout, colour thresholds and the cxv_* string ids below are
+    ilrathCXV's originals. The cxv_* strings still load from
+    st_cxv_rotting_timer_tooltip.xml (the framework overrode the script only,
+    not the text).
+
+    Load order: the zzz_ prefix guarantees this file loads after ui_item.script
+    and meat_spoiling.script (both non-'z'), so ui_item.build_desc_footer and
+    meat_spoiling.save_state already exist when we wrap them at chunk load.
+--]]
+
+
+
+-- Bail unless the spoiling system that owns the data is actually loaded and
+-- still exposes the accessor we rely on. If the mod chain changes underneath
+-- us, do nothing rather than error on every tooltip build.
+if not (meat_spoiling and meat_spoiling.save_state) then
+    return
+end
+
+if not (ui_item and ui_item.build_desc_footer) then
+    return
+end
+
+
+
+local gt = game.translate_string
+
+-- Borrow the live expiration_table reference via meat_spoiling.save_state,
+-- which assigns it straight into the table it's handed. Reuse one scratch
+-- table so the common path (every non-meat tooltip) allocates nothing.
+-- save_state never stores the table we pass, so this reference doesn't leak.
+local scratch = {}
+local function get_expiration_table()
+    scratch.expiration_table = nil
+    meat_spoiling.save_state(scratch)
+    return scratch.expiration_table
+end
+
+local build_footer_base = ui_item.build_desc_footer
+function ui_item.build_desc_footer(obj, sec, str)
+    -- Cheap gate first: only meat we're actively tracking has an entry, so
+    -- non-meat items delegate straight to the base footer and skip the
+    -- description resolution below.
+    local id = obj and obj:id()
+    local expiration_table = id and get_expiration_table()
+    local entry = expiration_table and expiration_table[id]
+    if not (entry and entry.duration) then
+        return build_footer_base(obj, sec, str)
+    end
+
+    str = str or gt(ini_sys:r_string_ex(sec, "description"))
+    if (not str) then return "" end
+
+    local expiration_hours = round_idp(entry.duration / 3600, 1)
+
+    local p_clr = utils_xml.get_color("d_purple")
+    local timer_clr = ((expiration_hours < 8) and utils_xml.get_color("d_red"))
+        or ((expiration_hours < 12) and utils_xml.get_color("d_orange"))
+        or ((expiration_hours < 24) and utils_xml.get_color("yellow"))
+        or utils_xml.get_color("pda_white")
+    local def_clr = utils_xml.get_color("ui_gray_1")
+
+    local sec_str = "\\n " .. p_clr .. gt("cxv_tooltip_dot") .. " " .. def_clr
+        .. gt("cxv_rotting_timer_title") .. " " .. timer_clr .. expiration_hours
+        .. " " .. gt("cxv_rotting_hrs") .. "\\n \\n" .. def_clr
+
+    return build_footer_base(obj, sec, str) .. sec_str
+end

@@ -12,6 +12,9 @@ being drawn or placed wrong in the inventory:
 - **HD Attachment Icons For GAMMA** — scoped weapon variants the pack doesn't
   cover now draw its straight gun-mounted scope icons instead of the diagonal
   inventory item icon
+- **ilrathCXV's Meat Spoiling Timer in Tooltips** — the "hours until rotten"
+  line reappears on raw/cooked meat; the HD framework's own copy of
+  `meat_spoiling.script` had dropped it
 
 Each fix disables itself if its mod isn't installed.
 
@@ -57,6 +60,18 @@ Each fix disables itself if its mod isn't installed.
    `wpn_addon_scope_` prefix), shifting coords so the visual center stays
    put. Rotation-fix math and `inv_grid_scale` handling are preserved.
 
+6. Meat spoiling tooltip: the "In-game Hours until Rotten" line comes from
+   ilrathCXV's Meat Spoiling Timer via a `ui_item.build_desc_footer` override.
+   HD_Inventory_Icons_Framework ships its own `meat_spoiling.script` (it adds an
+   `inv_grid_scale` tweak to the frozen-meat icon layer) and wins the load-order
+   conflict, but that copy dropped the footer override, so the tooltip vanished.
+   Reordering can't fix it: the framework copy must stay on top for its icon
+   fix, so this re-adds just the footer. The framework keeps its
+   `expiration_table` file-local; we borrow the live reference through its
+   public `save_state`, which only writes into the table it's handed. Footer
+   layout, colour thresholds and the `cxv_*` strings are the originals (the
+   strings still load, only the script was overridden).
+
 ## Files
 
 | File | Role |
@@ -65,6 +80,7 @@ Each fix disables itself if its mod isn't installed.
 | `gamedata/scripts/zzz_aaa_hd_icon_mark_pos_fix.script` | Standalone. Wraps SortingPlus' `icon_junk`/`icon_favs` at `on_game_start` to correct mark positions. Named `zzz_aaa_*` so it wraps before SortingPlus registers the functors. |
 | `gamedata/scripts/zzz_aaa_hd_attachment_layer_fix.script` | Standalone. Replaces `UICellItem:Create_Layer` at `on_game_start` to redirect attachment overlays to the HD pack's gun-mounted `_x` icons. |
 | `gamedata/scripts/zzzz_loot_searching.script` | Patched copy of Looting Takes Time REDUX's script (must win over that mod in MO2). Only `get_sort_info` changed, to scale-correct the precomputed corpse grid. |
+| `gamedata/scripts/zzz_aaa_meat_spoiling_tooltip_fix.script` | Standalone. Re-adds ilrathCXV's `ui_item.build_desc_footer` spoiling-timer line at chunk load (`zzz_` prefix loads it after `ui_item`/`meat_spoiling`), reading the live timer via `meat_spoiling.save_state`. No-ops if `meat_spoiling` isn't loaded. |
 | `gamedata/configs/unlocalizers/unlocalizer_fix_hd_icon_pos.ltx` | Exposes SortingPlus' local `favorite_itms`/`junk_itms`/`item_order` to our sort factory. Identical to (and safely additive with) the config mod 464 ships; needed because Inventory Antifreeze activates our `seax_*` script by filename even when 464 itself is disabled. |
 
 ## Install
