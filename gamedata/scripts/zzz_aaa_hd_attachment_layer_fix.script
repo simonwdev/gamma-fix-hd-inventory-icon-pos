@@ -5,7 +5,7 @@
     scopes/silencers as `<attachment_section>_x` sections (e.g. pu_x), and
     rewires the weapon variants it covers to use them via 1icon_layer.
     Any weapon variant the pack does not cover still draws the attachment's
-    *inventory item* icon on the gun -- and the pack's HD inventory icons are
+    *inventory item* icon on the gun, and the pack's HD inventory icons are
     drawn at an angle by design, so the overlay looks rotated and misaligned
     (e.g. the PU scope on the Mosin Obrez).
 

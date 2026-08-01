@@ -3,26 +3,29 @@
 Per-mod fixes for HD icons (`inv_grid_scale`, from HD_Inventory_Icons_Framework)
 being drawn or placed wrong in the inventory:
 
-- **464- Inventory Open Lag Reducer** — sorted icons no longer claim double-size tiles
-- **110- SortingPlus** — favourite/junk marks sit on the icon again; items taken
+- 464- Inventory Open Lag Reducer: sorted icons no longer claim double-size tiles
+- 110- SortingPlus: favourite/junk marks sit on the icon again, and items taken
   or dropped while looting land on the right rows
-- **468- Inventory Antifreeze** — no more sort errors on items added to big
-  inventories mid-sort
-- **Looting Takes Time REDUX** — corpse loot grids pack tightly, no cell-wide gaps
-- **HD Attachment Icons For GAMMA** — scoped weapon variants the pack doesn't
-  cover now draw its straight gun-mounted scope icons instead of the diagonal
+- 468- Inventory Antifreeze: items added to a big inventory mid-sort no longer
+  throw sort errors
+- Looting Takes Time REDUX: corpse loot grids pack tightly again instead of
+  leaving cell-wide gaps
+- HD Attachment Icons For GAMMA: scoped weapon variants the pack doesn't cover
+  now draw its straight gun-mounted scope icons instead of the diagonal
   inventory item icon
-- **ilrathCXV's Meat Spoiling Timer in Tooltips** — the "hours until rotten"
-  line reappears on raw/cooked meat; the HD framework's own copy of
-  `meat_spoiling.script` had dropped it
+- ilrathCXV's Meat Spoiling Timer in Tooltips: the "hours until rotten" line is
+  back on raw and cooked meat, after the HD framework's own copy of
+  `meat_spoiling.script` dropped it
+- MartinLore's Stalker 2 icons: the RPK-74 draws its own gun again instead of a
+  garbled crop of unrelated weapons
 
 Each fix disables itself if its mod isn't installed.
 
 ## What it fixes in detail
 
 1. Icon tile size after a sorted re-init: the lag reducer's replacement
-   `FindFreeCell` claimed unscaled (double-size) tiles for HD icons. Footprints
-   are now divided by `inv_grid_scale` and resolved through
+   `FindFreeCell` claimed unscaled (double-size) tiles for HD icons. This copy
+   divides footprints by `inv_grid_scale` and resolves them through
    `utils_xml.get_item_axis`, which also picks up `icon_override.ltx` entries.
 
 2. NPC inventory / looting: taking or putting items while looting adds items
@@ -38,7 +41,7 @@ Each fix disables itself if its mod isn't installed.
 
 3. SortingPlus favourite/junk mark icons: their positions were computed from
    the unscaled icon axis, drawing marks about twice too far right and down on
-   HD icons. The functors are wrapped to use the rendered icon size. The junk
+   HD icons. This wraps the functors to use the rendered icon size. The junk
    mark sits at the right edge, the favourite mark at the left edge (original
    SortingPlus layout).
 
@@ -58,7 +61,7 @@ Each fix disables itself if its mod isn't installed.
    `Create_Layer` is replaced with a version that redirects a layer section
    to its `_x` variant when one exists (also stripping the vanilla
    `wpn_addon_scope_` prefix), shifting coords so the visual center stays
-   put. Rotation-fix math and `inv_grid_scale` handling are preserved.
+   put. It keeps the rotation-fix math and the `inv_grid_scale` handling.
 
 6. Meat spoiling tooltip: the "In-game Hours until Rotten" line comes from
    ilrathCXV's Meat Spoiling Timer via a `ui_item.build_desc_footer` override.
@@ -72,6 +75,21 @@ Each fix disables itself if its mod isn't installed.
    layout, colour thresholds and the `cxv_*` strings are the originals (the
    strings still load, only the script was overridden).
 
+7. RPK-74 icon: MartinLore's Stalker 2 icons moves the RPK family onto the
+   `ui\ui_stalker2_rifles` HD atlas by patching the parent section
+   (`![wpn_rpk]`, 10x4 at 52,12, `inv_grid_scale = 2`). `[wpn_rpk74]:wpn_rpk`
+   inherits that texture and scale, but redeclares its own
+   `inv_grid_x/y/width/height`, which are still the legacy `ui_icon_equipment`
+   coordinates (5x2 at 35,14). The pack patches `wpn_rpk74_16` and
+   `wpn_rpk74_16_drum` explicitly but never plain `wpn_rpk74`, so nothing
+   corrects them. The engine therefore samples a 250x100 window at (1750,700)
+   out of the 4096x2048 atlas, a region belonging to other weapons, and draws
+   it in a `ceil(5/2) x ceil(2/2)` = 3x1 cell. Giving `wpn_rpk74` the parent's
+   HD coordinates restores the inheritance the override was breaking. It uses
+   `wpn_rpk`'s 10x4 rather than `wpn_rpk74_16`'s 12x4 because that keeps the
+   inventory footprint at 5x2 cells, which is what the gun occupied before the
+   HD pack.
+
 ## Files
 
 | File | Role |
@@ -81,6 +99,7 @@ Each fix disables itself if its mod isn't installed.
 | `gamedata/scripts/zzz_aaa_hd_attachment_layer_fix.script` | Standalone. Replaces `UICellItem:Create_Layer` at `on_game_start` to redirect attachment overlays to the HD pack's gun-mounted `_x` icons. |
 | `gamedata/scripts/zzzz_loot_searching.script` | Patched copy of Looting Takes Time REDUX's script (must win over that mod in MO2). Only `get_sort_info` changed, to scale-correct the precomputed corpse grid. |
 | `gamedata/scripts/zzz_aaa_meat_spoiling_tooltip_fix.script` | Standalone. Re-adds ilrathCXV's `ui_item.build_desc_footer` spoiling-timer line at chunk load (`zzz_` prefix loads it after `ui_item`/`meat_spoiling`), reading the live timer via `meat_spoiling.save_state`. No-ops if `meat_spoiling` isn't loaded. |
+| `gamedata/configs/mod_system_zzzzzzzzzzzzzzzzzzzzzzzzzzz_fix_rpk74_hd_icon.ltx` | DLTX override giving `wpn_rpk74` the HD atlas coordinates it should have inherited. DLTX applies patches in filename order (`FS_FileSet` is sorted by name, `Xr_ini.cpp`), not MO2 order, so the long `z` run is what makes this land after the icon pack's `mod_system_zzzzzzzzzzzzzzz_s2rifles.ltx`. |
 | `gamedata/configs/unlocalizers/unlocalizer_fix_hd_icon_pos.ltx` | Exposes SortingPlus' local `favorite_itms`/`junk_itms`/`item_order` to our sort factory. Identical to (and safely additive with) the config mod 464 ships; needed because Inventory Antifreeze activates our `seax_*` script by filename even when 464 itself is disabled. |
 
 ## Install
@@ -114,7 +133,7 @@ scripts no-op or degrade to a plain size/alphabetical sort instead of erroring.
 
 One degradation bit users for real: Inventory Antifreeze soft-detects
 `seax_sortingplus_opt_sort_by_kind` by filename, so shipping that script makes
-468 route sorting through it even when 464 is disabled — and without 464 no
+468 route sorting through it even when 464 is disabled. Without 464 no
 unlocalizers config loaded, so the guarded fallbacks silently dropped
 favourite/kind ordering ("inventory sorts randomly"). This mod now ships its
 own copy of the unlocalizers config so sorting works with or without 464, and

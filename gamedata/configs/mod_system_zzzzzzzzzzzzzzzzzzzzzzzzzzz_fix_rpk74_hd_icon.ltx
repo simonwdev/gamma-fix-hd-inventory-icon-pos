@@ -1,0 +1,38 @@
+; Restores wpn_rpk74's icon, which renders as a garbled fragment in the
+; inventory and the F7 debug spawner.
+;
+; MartinLore's Stalker 2 icons repoints the RPK family at the HD atlas
+; ui\ui_stalker2_rifles by patching the parent section:
+;
+;   ![wpn_rpk]  icons_texture=ui\ui_stalker2_rifles  10x4 @ (52,12)  scale=2
+;
+; wpn_rpk74 inherits from wpn_rpk ([wpn_rpk74]:wpn_rpk in
+; items/weapons/w_rpk.ltx, won by "410- 3DSS for GAMMA"), so it picks up the
+; HD icons_texture and inv_grid_scale from the patched parent. But it also
+; redeclares its own inv_grid_x/y/width/height, which are still the legacy
+; ui_icon_equipment coordinates (5x2 @ 35,14). MartinLore patches
+; wpn_rpk74_16 and wpn_rpk74_16_drum explicitly, but never plain wpn_rpk74,
+; so nothing corrects them.
+;
+; The engine therefore samples a 250x100 window at (1750,700) out of the
+; 4096x2048 HD atlas, a region belonging to unrelated weapons, and draws it
+; in a ceil(5/2) x ceil(2/2) = 3x1 cell. That is the two disconnected pieces
+; labelled "RPK-74" in the top-right of the debug spawner's By Icon panel.
+;
+; Fix: give wpn_rpk74 the parent's HD coordinates, i.e. restore the
+; inheritance the override was silently breaking. Using wpn_rpk's 10x4 also
+; keeps the item's inventory footprint at 5x2 cells (10/scale x 4/scale),
+; matching what it occupied before the HD icon pack. Adopting
+; wpn_rpk74_16's icon instead (12x4 @ 0,20) would be a closer visual match
+; for the 5.45mm variant but would widen the footprint to 6x2 cells.
+;
+; Filename sorts after mod_system_zzzzzzzzzzzzzzz_s2rifles.ltx so this
+; override is applied last.
+
+![wpn_rpk74]
+icons_texture      = ui\ui_stalker2_rifles
+inv_grid_width     = 10
+inv_grid_height    = 4
+inv_grid_x         = 52
+inv_grid_y         = 12
+inv_grid_scale     = 2
