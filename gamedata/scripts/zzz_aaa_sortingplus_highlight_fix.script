@@ -1,0 +1,81 @@
+--[[
+    Fix HD Inventory Icon Position: restore SortingPlus' highlight overrides,
+    dropped by the HD framework's copy of zzz_rax_sortingplus_mcm.script.
+
+    Why this exists:
+      HD_Inventory_Icons_Framework ships zzz_rax_sortingplus_mcm.script and wins
+      the load-order conflict over SortingPlus' own copy. The framework's copy is
+      an older fork and is missing three overrides that SortingPlus still ships:
+
+        ui_inventory.UIInventory:Highlight        -- records that a highlight is up
+        ui_inventory.UIInventory:UnHighlight_All  -- only clears when one is up
+        utils_ui.UICellItem:Update                -- clears a cell's stale highlight
+
+      The first two are a pair: UnHighlight_All walks every cell in every
+      container, and SortingPlus made it a no-op unless a highlight was actually
+      set. The third clears a cell's highlight as it is refreshed, so a highlight
+      does not linger on a cell that has been recycled for a different item.
+
+    Confidence note, read before trusting this file:
+      Unlike the satiety and meat picker fixes, these three were found by
+      auditing the framework's forks rather than from a reported symptom. They
+      are faithful re-adds of SortingPlus' code, but I have not reproduced a
+      user-visible bug caused by their absence -- the likely effects are wasted
+      work in UnHighlight_All and highlights outliving their cell. The Update
+      override is the one to watch: it runs on every cell refresh, so if
+      highlighting misbehaves after this ships, drop this file first.
+
+    Interaction with zzzz_loot_searching.script:
+      That file also wraps utils_ui.UICellItem.Highlight, to suppress highlights
+      on hidden loot. It loads after this one (zzzz_ sorts after zzz_aaa_), so
+      its wrapper ends up outermost. Our Update override calls self:Highlight(),
+      which resolves through the class table at call time and therefore reaches
+      the loot-searching wrapper -- hidden items stay suppressed.
+
+    Idempotence:
+      SortingPlus exposes no marker we can test for, so unlike the other fixes in
+      this mod we cannot detect whether its copy already won and skip. All three
+      wrappers are written to be harmless if applied twice: setting a flag that
+      is already set, a guarded clear that re-checks the same flag, and a
+      highlight clear that is already idempotent.
+--]]
+
+
+
+if not (ui_inventory and ui_inventory.UIInventory and utils_ui and utils_ui.UICellItem) then
+    return
+end
+
+
+
+-- Record that a highlight is up, so UnHighlight_All knows there is work to do.
+local base_Highlight = ui_inventory.UIInventory.Highlight
+if base_Highlight then
+    ui_inventory.UIInventory.Highlight = function(self, sec, bag_id)
+        self.highlight_set = true
+        return base_Highlight(self, sec, bag_id)
+    end
+end
+
+
+-- Skip the full sweep over every cell unless something is actually highlighted.
+local base_UnHighlight_All = ui_inventory.UIInventory.UnHighlight_All
+if base_UnHighlight_All then
+    ui_inventory.UIInventory.UnHighlight_All = function(self)
+        if self.highlight_set then
+            base_UnHighlight_All(self)
+            self.highlight_set = false
+        end
+    end
+end
+
+
+-- Clear a cell's highlight as it refreshes, so it cannot outlive the item that
+-- earned it when the cell is reused.
+local base_CellItem_Update = utils_ui.UICellItem.Update
+if base_CellItem_Update then
+    utils_ui.UICellItem.Update = function(self, obj)
+        self:Highlight()
+        return base_CellItem_Update(self, obj)
+    end
+end
