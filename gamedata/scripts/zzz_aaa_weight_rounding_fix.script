@@ -1,0 +1,92 @@
+--[[
+    Fix HD Inventory Icon Position: restore one decimal place on carry-weight
+    stats in item tooltips, dropped by the HD framework's copy of utils_ui.script.
+
+    Why this exists:
+      Sota's utils_ui.script forces the tooltip's decimal-place setting to 1 for
+      the two carry-weight stats, in the stat-row branch of UIInfoItem:Update:
+
+          -- fix rounding accuracy for weight property
+          if (stat == "additional_inventory_weight") or (stat == "boost_max_weight") then
+              idp_stats_tt = 1
+
+      The HD framework ships an older fork of that file (2025-03-27 vs Sota's
+      2025-09-22) and wins the load-order conflict, so the line is gone and the
+      stats fall back to the MCM default, which is 0.
+
+      ui_inventory.stats_round_idp already protects small numbers -- under 1 it
+      raises the decimal count itself -- so only values of 1 kg and up flatten.
+      Across base Anomaly's 201 non-zero additional_inventory_weight values, 31
+      lose precision, by up to 0.5 kg (1.58 shows as 2, 2.58 as 3). GAMMA's
+      artefact and backpack mods add more. Since these are numbers players read
+      to compare outfits and backpacks, being half a kilo out matters.
+
+    Why this needs the unlocalizer:
+      idp_stats_tt is a function-local inside UIInfoItem:Update, so there is no
+      seam to hook -- the engine's unlocalizer only reaches column-0 file-scope
+      declarations. What it can reach is line 41, which caches the rounding
+      function itself. Once that is promoted out of file scope we can wrap the
+      rounding call instead of the setting that feeds it, and force the decimal
+      place from there.
+
+      Knowing which stat is being rounded takes one more hook: get_stats_value
+      is called once per stat at the top of each iteration of the stat loop
+      (utils_ui.script:2824), and every stats_round_idp call in that iteration
+      follows it with the same stat. get_stats_string_value has the same shape
+      (call at :423, rounding at :435 and :439). So recording the stat there
+      covers all four rounding sites.
+
+      This assumes get_stats_value is not re-entrant. Its value_functors call
+      into other modules but none call back into it, so the recorded stat cannot
+      be clobbered mid-iteration.
+
+    Why the usual fragility argument does not apply:
+      Unlocalizing normally risks silently no-opping if upstream reformats the
+      declaration. The file being rewritten here belongs to an unmaintained mod,
+      so it will not change -- and Sota's copy has the identical line at the same
+      column, so this still lands if the load order ever flips. In that case
+      Sota's own code sets the same decimal place and our wrapper becomes a no-op
+      rather than a conflict.
+
+    If the unlocalizer did not apply (no modded exes, or the config did not
+    load) then utils_ui.stats_round_idp is nil, and we log once and do nothing.
+--]]
+
+
+
+local WEIGHT_STATS = {
+    ["additional_inventory_weight"] = true,
+    ["boost_max_weight"]            = true,
+}
+
+-- Stat currently being rendered, recorded by the get_stats_value wrapper and
+-- read by the stats_round_idp wrapper later in the same loop iteration.
+local current_stat = nil
+
+
+function on_game_start()
+    if not (utils_ui and utils_ui.get_stats_value) then
+        return
+    end
+
+    -- Present only if the unlocalizer promoted it out of file scope.
+    if type(utils_ui.stats_round_idp) ~= "function" then
+        printf("! FIXHD| weight rounding fix inactive: utils_ui.stats_round_idp is not exposed "
+            .. "(unlocalizer_fix_hd_stats_rounding.ltx did not apply -- modded exes required)")
+        return
+    end
+
+    local base_get_stats_value = utils_ui.get_stats_value
+    utils_ui.get_stats_value = function(obj, sec, gr, stat)
+        current_stat = stat
+        return base_get_stats_value(obj, sec, gr, stat)
+    end
+
+    local base_stats_round_idp = utils_ui.stats_round_idp
+    utils_ui.stats_round_idp = function(num, idp)
+        if current_stat and WEIGHT_STATS[current_stat] and ((idp or 0) < 1) then
+            idp = 1
+        end
+        return base_stats_round_idp(num, idp)
+    end
+end

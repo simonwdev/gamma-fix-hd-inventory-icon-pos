@@ -1,0 +1,20 @@
+; Fix HD Inventory Icon Position -- weight rounding in item tooltips.
+;
+; Promotes utils_ui.script's file-local `stats_round_idp` out of file scope so
+; zzz_aaa_weight_rounding_fix.script can wrap it. See that file for why.
+;
+; The engine (CScriptStorage::do_file, script_storage.cpp) rewrites matching
+; `^local` declarations before compiling the script, so only column-0 file-scope
+; declarations qualify. `local stats_round_idp = ui_inventory.stats_round_idp`
+; sits at column 0 in both the HD framework's copy of utils_ui.script and
+; Sota's, so this lands whichever one wins the load order.
+;
+; Unlocalizing REQUIRES modded EXEs (demonized / SSS / GAMMA). GAMMA ships them.
+; Without them this file is inert and the fix script detects that and no-ops.
+;
+; Kept separate from unlocalizer_fix_hd_icon_pos.ltx so that file stays byte
+; identical to the copy mod 464 ships. Sections merge across every file in this
+; folder, so adding one here cannot clash with another mod's.
+
+[utils_ui]
+stats_round_idp
