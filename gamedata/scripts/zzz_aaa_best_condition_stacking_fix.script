@@ -1,0 +1,135 @@
+--[[
+    Fix HD Inventory Icon Position: restore best-condition stacking, dropped by
+    the HD framework's copy of utils_ui.script.
+
+    Why this exists:
+      HD_Inventory_Icons_Framework ships utils_ui.script and wins the load-order
+      conflict over Sota's UI Rework. The framework's copy is an older fork
+      (2025-03-27 vs Sota 2025-09-22) and predates this feature, so it is absent
+      from the running game even though Sota still ships it.
+
+      When several copies of an item stack into one inventory cell, only one of
+      them is the "top of the stack" whose icon and condition bar you actually
+      see. Sota made that always be the best-condition item, in three parts:
+
+        UICellItem:FindChildIdByBestCondition  -- pick the healthiest child
+        UICellItem:AddChild                    -- promote a better item on the
+                                                  way in, demoting the old top
+        UICellItem:ResetToChild                -- when the top is removed,
+                                                  promote the best remaining
+
+      Without them the cell shows whichever item happened to arrive first, so a
+      stack of worn items can hide a pristine one and the condition bar under
+      the stack is meaningless.
+
+    Reordering cannot fix this: the framework copy has to stay on top for its
+    icon-scaling work. So we re-add the three pieces here.
+
+    Why ResetToChild is a full copy rather than a wrapper:
+      The base picks its child mid-function, by taking whatever pairs() yields
+      first from self.childs. There is no seam to hook, and pairs() order is not
+      controllable. Reimplementing is normally the wrong call because it freezes
+      us against upstream -- but the file we are overriding is the framework's,
+      and the framework is not maintained, so there is no upstream to drift from.
+      The body below is Sota's, unchanged apart from dropping the commented-out
+      original loop. If Sota's copy ever wins the load order we bail at the top
+      and never touch any of this.
+
+    Load order: chunk-scope patching is enough here -- these are plain methods on
+    utils_ui.UICellItem, and every caller resolves them through the class table
+    at call time.
+--]]
+
+
+
+if not (utils_ui and utils_ui.UICellItem) then
+    return
+end
+
+-- FindChildIdByBestCondition exists only in Sota's copy. If it is present then
+-- Sota's utils_ui.script won the load order and the whole feature is already
+-- live -- patching over it would only risk diverging from it.
+if utils_ui.UICellItem.FindChildIdByBestCondition then
+    return
+end
+
+
+
+function utils_ui.UICellItem:FindChildIdByBestCondition(orElse)
+    if not self.childs then
+        return orElse
+    end
+
+    local id_child
+    local max_condition_so_far = -1
+
+    for id, cnt in pairs(self.childs) do
+        local obj = level.object_by_id(id)
+        local condition = (obj and obj:condition()) or 0
+
+        if (max_condition_so_far < condition) then
+            id_child = id
+            max_condition_so_far = condition
+        end
+    end
+
+    return id_child or orElse
+end
+
+
+-- Promote on the way in: if the incoming item beats the current top of the
+-- stack, it becomes the visible one and the old top is re-inserted as a child.
+-- The recursion terminates because self.ID has changed by the time we re-enter.
+local base_AddChild = utils_ui.UICellItem.AddChild
+
+function utils_ui.UICellItem:AddChild(obj)
+    -- no need for childs in manual cells
+    if self.manual then
+        return false
+    end
+
+    if (not self.childs) then
+        self.childs = {}
+    end
+
+    local current_obj = self.ID and level.object_by_id(self.ID)
+    if current_obj and obj and (current_obj:condition() < obj:condition()) then
+        self:Set(obj)
+        return self:AddChild(current_obj)
+    end
+
+    return base_AddChild(self, obj)
+end
+
+
+-- Promote on the way out: when the top of the stack leaves the cell, the best
+-- remaining child takes its place instead of an arbitrary one.
+function utils_ui.UICellItem:ResetToChild()
+    local id_child
+    if self.childs then
+        id_child = self:FindChildIdByBestCondition()
+    end
+
+    if id_child then
+
+        -- Real
+        if (self.showcase == 0) then
+            local obj = level.object_by_id(id_child)
+            self.childs[id_child] = nil
+
+            self.ID = id_child
+            self.section = obj and obj:section()
+            self:Update(obj)
+
+        -- Dummy
+        else
+            self.childs[id_child] = nil
+            self:Update()
+        end
+
+        return false
+    else
+        self:Reset()
+        return true
+    end
+end
