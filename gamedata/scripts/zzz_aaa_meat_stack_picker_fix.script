@@ -1,0 +1,81 @@
+--[[
+    Fix HD Inventory Icon Position: restore the stack picker on meat and
+    patches, dropped by the HD framework's copy of meat_spoiling.script.
+
+    Why this exists:
+      This is the sibling of the meat spoiling tooltip fix. The framework's
+      meat_spoiling.script is an older fork of ilrathCXV's "Meat Spoiling Timer
+      in Tooltips" and wins the load-order conflict over it. The fork drops
+      three functions; zzz_aaa_meat_spoiling_tooltip_fix.script restored
+      build_desc_footer, and this file restores the other two.
+
+      Anomaly only lets you expand a stack into individual items in the picker
+      when the item's section declares use_condition. Meat and patches do not,
+      so a stack of them collapses to a single entry and you cannot pick the
+      freshest piece -- which is exactly what the spoiling timer exists to let
+      you do. ilrathCXV worked around it by swapping ui_inventory's SYS_GetParam
+      for the duration of Picker_Toggle, so that use_condition reads as true for
+      meat and patches only, then putting the original back.
+
+      ui_inventory.script calls SYS_GetParam unqualified, so it resolves through
+      the ui_inventory namespace table before falling back to _G. Assigning
+      ui_inventory.SYS_GetParam therefore shadows the global for that one module
+      and nothing else, and only for the duration of the call.
+
+    Credit for the original approach: ilrathCXV, via Utjan's "Tagged Patches".
+
+    Deviations from ilrathCXV's version, both deliberate:
+      - the previous value of ui_inventory.SYS_GetParam is saved and restored
+        rather than cleared to nil, so we cannot stomp another mod's override
+      - Picker_Toggle's return value is passed through rather than swallowed
+
+    Load order: the zzz_ prefix puts our on_game_start after meat_spoiling's, so
+    meat_spoiling.meats is populated and Picker_Toggle is whatever the mod chain
+    settled on by then.
+--]]
+
+
+
+-- new_get_param exists only in ilrathCXV's copy. If it is present then that
+-- copy won the load order, this behaviour is already installed, and we must not
+-- add a second layer of it.
+if meat_spoiling and meat_spoiling.new_get_param then
+    return
+end
+
+-- meats is a global in both copies; without it we have nothing to test against.
+if not (meat_spoiling and meat_spoiling.meats) then
+    return
+end
+
+if not (ui_inventory and ui_inventory.UIInventory and ui_inventory.UIInventory.Picker_Toggle) then
+    return
+end
+
+
+
+local meats = meat_spoiling.meats
+
+-- Report use_condition as true for meat and patches, delegate everything else.
+local function picker_get_param(typ, sec, param, def)
+    if (param == "use_condition") and sec then
+        if meats[sec] or (tagged_patches and tagged_patches.is_patch(nil, sec)) then
+            return true
+        end
+    end
+    return SYS_GetParam(typ, sec, param, def)
+end
+
+function on_game_start()
+    local base_Picker_Toggle = ui_inventory.UIInventory.Picker_Toggle
+
+    ui_inventory.UIInventory.Picker_Toggle = function(self, bag, idx, update_mode, force_hide)
+        local prev = ui_inventory.SYS_GetParam
+        ui_inventory.SYS_GetParam = picker_get_param
+
+        local result = base_Picker_Toggle(self, bag, idx, update_mode, force_hide)
+
+        ui_inventory.SYS_GetParam = prev
+        return result
+    end
+end
