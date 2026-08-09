@@ -1,0 +1,74 @@
+--[[
+    Fix HD Inventory Icon Position: restore the "%" satiety reading on food,
+    which the HD framework turns into a raw "kcal eq." number.
+
+    Why this exists:
+      Sota's UI Rework displays food satiety in two steps. Its
+      sota_stats_tweak_gamma.script writes eat_satiety into the booster stats
+      table as magnitude=1000 / unit="st_kcal", and its own utils_ui.script
+      then converts that back to a percentage at render time, inside the
+      tooltip stat-row branch of UIInfoItem:Update:
+
+          -- display hts values in %
+          elseif (stat == "eat_satiety") then
+              gr.magnitude = 100
+              gr.unit = "st_perc"
+
+      HD_Inventory_Icons_Framework ships its own utils_ui.script and wins the
+      load-order conflict over Sota's. Its copy is an older fork of that same
+      file (framework 2025-03-27 vs Sota 2025-09-22) and predates the block
+      above, so the conversion never runs and step one's kcal reaches the
+      screen. Only the display is affected; the underlying eat_satiety value
+      and the hunger mechanic are untouched.
+
+      Reordering is not a fix here for the same reason as the meat spoiling
+      tooltip: the framework copy has to stay on top for its icon work. So we
+      re-apply the conversion to the table entry instead.
+
+    Why patch the table entry rather than the renderer:
+      Sota's version mutates gr.magnitude/gr.unit on the shared stats_table
+      entry anyway, so setting the same two fields once per table rebuild
+      reaches the identical end state. eat_satiety has track=false, so it
+      always takes the text branch where those two fields are the only inputs
+      that decide the printed unit. The renderer itself is not reachable from
+      Lua: idp_stats_tt is a function-local inside UIInfoItem:Update.
+
+    Safe with or without the framework:
+      If the framework is absent (or later drops its utils_ui.script), Sota's
+      renderer sets the very same magnitude=100 / unit="st_perc" on the very
+      same table, so this becomes a redundant no-op rather than a conflict.
+
+    Load order: the zzz_ prefix guarantees this chunk loads after
+    sota_stats_tweak_gamma.script, which wraps ish_item_stats.override_stats_
+    table at chunk load. Wrapping after Sota makes ours the outermost wrapper,
+    so our fields are applied last -- after Sota's booster table has been
+    written wholesale. ish_item_stats calls override_stats_table() from its
+    on_game_start (and again on g_game_difficulty console changes), which is
+    always after every chunk has loaded, so both paths land correctly.
+--]]
+
+
+
+-- Bail unless the override chain we hook is actually present. If the mod chain
+-- changes underneath us, do nothing rather than error at load.
+if not (ish_item_stats and ish_item_stats.override_stats_table) then
+    return
+end
+
+
+
+local og_override_stats_table = ish_item_stats.override_stats_table
+
+ish_item_stats.override_stats_table = function()
+    og_override_stats_table()
+
+    local booster = utils_ui and utils_ui.stats_table and utils_ui.stats_table["booster"]
+    local gr = booster and booster["eat_satiety"]
+
+    -- Only rewrite the kcal form. Anything else means an upstream mod already
+    -- owns this entry, and stomping it would repeat the bug we are fixing.
+    if gr and (gr.unit == "st_kcal") then
+        gr.magnitude = 100
+        gr.unit = "st_perc"
+    end
+end
