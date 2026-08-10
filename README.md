@@ -3,14 +3,14 @@
 Per-mod fixes for HD icons (`inv_grid_scale`, from HD_Inventory_Icons_Framework)
 being drawn or placed wrong in the inventory:
 
-- 464- Inventory Open Lag Reducer: sorted icons no longer claim double-size tiles
-- 468- Inventory Antifreeze: items added to a big inventory mid-sort no longer throw sort errors
-- 110- SortingPlus: favourite/junk marks sit on the icon again; items taken or dropped while looting land on the right rows; its highlight bookkeeping is back
-- Looting Takes Time REDUX: corpse loot grids pack tightly again instead of leaving cell-wide gaps
-- HD Attachment Icons For GAMMA: scoped weapon variants the pack doesn't cover now draw its straight gun-mounted scope icons instead of the diagonal inventory item icon
-- MartinLore's Stalker 2 icons: the RPK-74 draws its own gun again instead of a garbled crop of unrelated weapons
-- ilrathCXV's Meat Spoiling Timer in Tooltips: the "hours until rotten" line is back on raw and cooked meat; meat and patch stacks expand in the picker again, so you can take the freshest piece
-- UI Rework G.A.M.M.A. Style - Sota: food tooltips read satiety as a percentage instead of a raw kcal figure; a stack shows the best-condition item on top; carry-weight bonuses keep their decimal, so a 1.58 kg backpack stops reading as 2 kg
+- **464- Inventory Open Lag Reducer**: sorted icons no longer claim double-size tiles
+- **468- Inventory Antifreeze**: items added to a big inventory mid-sort no longer throw sort errors
+- **110- SortingPlus**: favourite/junk marks sit on the icon again; items taken or dropped while looting land on the right rows; its highlight bookkeeping is back
+- **Looting Takes Time REDUX**: corpse loot grids pack tightly again instead of leaving cell-wide gaps
+- **HD Attachment Icons For GAMMA**: scoped weapon variants the pack doesn't cover now draw its straight gun-mounted scope icons instead of the diagonal inventory item icon
+- **MartinLore's Stalker 2 icons**: the RPK-74 draws a gun again instead of a garbled crop of unrelated weapons, and the drum-mag RPK-16 is no longer squashed when the icon pack isn't installed
+- **ilrathCXV's Meat Spoiling Timer in Tooltips**: the "hours until rotten" line is back on raw and cooked meat; meat and patch stacks expand in the picker again, so you can take the freshest piece
+- **UI Rework G.A.M.M.A. Style - Sota**: food tooltips read satiety as a percentage instead of a raw kcal figure; a stack shows the best-condition item on top; carry-weight bonuses keep their decimal, so a 1.58 kg backpack stops reading as 2 kg
 
 Each fix disables itself if its mod isn't installed.
 
@@ -115,11 +115,27 @@ anyway.
    `wpn_rpk74_16_drum` explicitly but never plain `wpn_rpk74`, so nothing
    corrects them. The engine therefore samples a 250x100 window at (1750,700)
    out of the 4096x2048 atlas, a region belonging to other weapons, and draws
-   it in a `ceil(5/2) x ceil(2/2)` = 3x1 cell. Giving `wpn_rpk74` the parent's
-   HD coordinates restores the inheritance the override was breaking. It uses
-   `wpn_rpk`'s 10x4 rather than `wpn_rpk74_16`'s 12x4 because that keeps the
-   inventory footprint at 5x2 cells, which is what the gun occupied before the
-   HD pack.
+   it in a `ceil(5/2) x ceil(2/2)` = 3x1 cell. The fix deletes the four stale
+   coordinates (DLTX drops a `!key` line in the base+mods merge, so the
+   parent's value survives the parent merge that follows), restoring the
+   inheritance the override was breaking. With the pack installed that
+   resolves to 10x4 at 52,12, which keeps the inventory footprint at 5x2
+   cells - what the gun occupied before the HD pack.
+
+   Deleting rather than assigning the HD coordinates matters. Neither
+   `wpn_rpk` nor `wpn_rpk74` declares `icons_texture` or `inv_grid_scale` of
+   its own; both reach `wpn_rpk74` only by inheritance from `![wpn_rpk]`.
+   Writing them here (v0.5.0 through v0.6.0 did) was redundant with the icon
+   pack installed and wrong without it. `icons_texture` forced the section
+   onto an atlas that wasn't there, and `inv_grid_scale` leaked to
+   `wpn_rpk74_16_drum`, the one other section that inherits `wpn_rpk74`. The
+   drum redeclares its texture and all four coordinates but not the scale, so
+   it took ours and drew its 250x100 icon in a 3x1 cell. `wpn_rpk74_16` was
+   unaffected because it inherits `identity_immunities`, not `wpn_rpk74`.
+   Without the icon pack `wpn_rpk74` now falls back to `wpn_rpk`'s vanilla
+   icon (5x2 at 35,18) instead of its own (35,14) - a near-identical gun, and
+   nothing garbled. A DLTX patch cannot be conditioned on another mod's
+   presence, so that is the tradeoff.
 
 8. Food satiety shown in kcal instead of %: Sota's UI Rework does this in two
    steps. `sota_stats_tweak_gamma.script` writes `eat_satiety` into the booster
@@ -198,7 +214,7 @@ uses.
 | `gamedata/scripts/zzz_aaa_sortingplus_highlight_fix.script` | Re-adds SortingPlus' `UIInventory:Highlight` / `UnHighlight_All` / `UICellItem:Update` overrides. No marker exists to detect SortingPlus' copy, so all three are written to be safe if applied twice. |
 | `gamedata/scripts/zzz_aaa_weight_rounding_fix.script` | Wraps `utils_ui.get_stats_value` to record the current stat, and the unlocalized `utils_ui.stats_round_idp` to force 1 decimal place on the two carry-weight stats, both at `on_game_start`. Logs a one-time `! FIXHD\|` warning and no-ops if the unlocalizer didn't apply. |
 | `gamedata/configs/unlocalizers/unlocalizer_fix_hd_stats_rounding.ltx` | Promotes `utils_ui`'s file-local `stats_round_idp` out of file scope for the fix above. Kept separate from the SortingPlus unlocalizer so that one stays byte-identical to mod 464's copy; sections merge across every file in the folder. Requires modded exes. |
-| `gamedata/configs/mod_system_zzzzzzzzzzzzzzzzzzzzzzzzzzz_fix_rpk74_hd_icon.ltx` | DLTX override giving `wpn_rpk74` the HD atlas coordinates it should have inherited. DLTX applies patches in filename order (`FS_FileSet` is sorted by name, `Xr_ini.cpp`), not MO2 order, so the long `z` run is what makes this land after the icon pack's `mod_system_zzzzzzzzzzzzzzz_s2rifles.ltx`. |
+| `gamedata/configs/mod_system_zzzzzzzzzzzzzzzzzzzzzzzzzzz_fix_rpk74_hd_icon.ltx` | DLTX override deleting `wpn_rpk74`'s stale grid coordinates so it inherits the ones the icon pack sets on `wpn_rpk`. DLTX applies patches in filename order (`FS_FileSet` is sorted by name, `Xr_ini.cpp`), not MO2 order, so the long `z` run is what makes this land after the icon pack's `mod_system_zzzzzzzzzzzzzzz_s2rifles.ltx`. |
 | `gamedata/configs/unlocalizers/unlocalizer_fix_hd_icon_pos.ltx` | Exposes SortingPlus' local `favorite_itms`/`junk_itms`/`item_order` to our sort factory. Identical to (and safely additive with) the config mod 464 ships; needed because Inventory Antifreeze activates our `seax_*` script by filename even when 464 itself is disabled. |
 
 ## Install

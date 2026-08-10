@@ -19,20 +19,35 @@
 ; in a ceil(5/2) x ceil(2/2) = 3x1 cell. That is the two disconnected pieces
 ; labelled "RPK-74" in the top-right of the debug spawner's By Icon panel.
 ;
-; Fix: give wpn_rpk74 the parent's HD coordinates, i.e. restore the
-; inheritance the override was silently breaking. Using wpn_rpk's 10x4 also
-; keeps the item's inventory footprint at 5x2 cells (10/scale x 4/scale),
-; matching what it occupied before the HD icon pack. Adopting
-; wpn_rpk74_16's icon instead (12x4 @ 0,20) would be a closer visual match
-; for the 5.45mm variant but would widen the footprint to 6x2 cells.
+; Fix: delete the four stale coordinates so the inheritance the override was
+; silently breaking is restored. DLTX drops a "!key" line in the base+mods
+; merge (IsMergingBaseAndMod, Xr_ini.cpp), so the parent's value survives the
+; parent merge that follows. Whatever wpn_rpk resolves to is what wpn_rpk74
+; draws.
+;
+; Deleting rather than reassigning is deliberate. Neither wpn_rpk nor
+; wpn_rpk74 declares icons_texture or inv_grid_scale of its own; both reach
+; wpn_rpk74 only by inheritance from MartinLore's ![wpn_rpk]. Writing them
+; here was redundant with the icon pack installed and wrong without it:
+; icons_texture forced the section onto an atlas that wasn't there, and
+; inv_grid_scale leaked to wpn_rpk74_16_drum, the one other section that
+; inherits wpn_rpk74 ([wpn_rpk74_16_drum]:wpn_rpk74, won by "461- GIMP").
+; The drum redeclares its texture and all four coordinates but not the scale,
+; so it took ours and drew its 250x100 icon in a 3x1 cell. wpn_rpk74_16 was
+; unaffected because it inherits identity_immunities, not wpn_rpk74.
+;
+; With the icon pack installed this resolves to exactly what assigning the HD
+; coordinates did: ui\ui_stalker2_rifles, 10x4 @ (52,12), scale 2, keeping the
+; inventory footprint at 5x2 cells. Without it, wpn_rpk74 falls back to
+; wpn_rpk's vanilla ui_icon_equipment icon (5x2 @ 35,18) instead of its own
+; (35,14) - a near-identical gun, and nothing is garbled. A DLTX patch cannot
+; be conditioned on another mod's presence, so that is the tradeoff.
 ;
 ; Filename sorts after mod_system_zzzzzzzzzzzzzzz_s2rifles.ltx so this
 ; override is applied last.
 
 ![wpn_rpk74]
-icons_texture      = ui\ui_stalker2_rifles
-inv_grid_width     = 10
-inv_grid_height    = 4
-inv_grid_x         = 52
-inv_grid_y         = 12
-inv_grid_scale     = 2
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
