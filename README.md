@@ -10,6 +10,7 @@ being drawn or placed wrong in the inventory:
 - **HD Attachment Icons For GAMMA**: scoped weapon variants the pack doesn't cover now draw its straight gun-mounted scope icons instead of the diagonal inventory item icon
 - **MartinLore's Stalker 2 icons**: the RPK-74 draws a gun again instead of a garbled crop of unrelated weapons, and the drum-mag RPK-16 is no longer squashed when the icon pack isn't installed
 - **ilrathCXV's Meat Spoiling Timer in Tooltips**: the "hours until rotten" line is back on raw and cooked meat; meat and patch stacks expand in the picker again, so you can take the freshest piece
+- **G.A.M.M.A. Artefacts Reinvention**: stacks of artefacts, junk artefacts, outfit attachments and mutant hides open in the picker again, so you can take a specific one instead of only the one on top (a self-inflicted regression, broken in v0.6.0)
 - **UI Rework G.A.M.M.A. Style - Sota**: food tooltips read satiety as a percentage instead of a raw kcal figure; a stack shows the best-condition item on top; carry-weight bonuses keep their decimal, so a 1.58 kg backpack stops reading as 2 kg
 
 Each fix disables itself if its mod isn't installed.
@@ -160,6 +161,59 @@ anyway.
    restoring the previous `ui_inventory.SYS_GetParam` rather than clearing it to
    nil.
 
+   The shim also has to *chain* to whatever it displaced, which v0.6.0 and
+   v0.7.0 did not. Artefacts are the same shape of problem as meat:
+   `use_condition` is commented out on `[af_base_mlr]` in vanilla
+   `items_artefacts.ltx`, so nothing about them declares it in config.
+   G.A.M.M.A. Artefacts Reinvention solves it the same way ilrathCXV did, in
+   `zz_item_artefact.script`: a `SYS_GetParam` shim that reports `use_condition`
+   as true for five degradable kinds, installed at chunk load and gated on MCM
+   `enable_condition_bar`, which defaults on. That is what gives those items
+   both their condition bar and their picker.
+
+   The name undersells the reach, so the regression was never artefact-only:
+
+   | kind | what it is | was broken |
+   |------|------------|------------|
+   | `i_arty` | artefacts (`af_medusa`) | yes |
+   | `i_arty_junk` | junk artefacts (`af_black`) | yes |
+   | `i_attach` | outfit attachments (`af_kevlar`, `af_camelbak`) | yes |
+   | `i_mutant_belt` | mutant hides and parts (`hide_chimera`) | yes |
+   | `i_arty_cont` | artefact containers (`af_medusa_lead_box`) | no |
+
+   Mutant hides matter as much as artefacts here, because the same script
+   assigns their condition from the knife they were skinned with. Containers
+   escaped because `mod_system_grok_llmc_fix.ltx` sets a real
+   `use_condition = true` on every `af_*_lead_box` section: the flag is in
+   config, so there was no shim for ours to displace.
+
+   The shim installs into `ui_inventory` and `utils_ui` and never touches `_G`.
+   Ours fell back to the global `SYS_GetParam`, so for the duration of
+   `Picker_Toggle` that override was invisible and those items read
+   `use_condition = false` -- `Picker_Toggle` logged `cell has no condition ->
+   hide` and the strip below stayed empty. The condition bar kept drawing,
+   because `Add_ProgressBar` reads `utils_ui.SYS_GetParam`, which we do not
+   touch: the stack looked expandable and simply refused.
+
+   Nothing else was in range. That shim diverges from the global only for
+   `use_condition`, `use_condition` is read exactly once in the whole of
+   `ui_inventory.script` (the picker gate), and no other mod here holds a
+   persistent `ui_inventory.SYS_GetParam`. Weapons, outfits, headgear and ammo
+   were never affected either way, since the gate rescues them on clsid.
+
+   Stacking never saw the shim at all, which is why this was so visible:
+   `FindSimilar` belongs to `rax_stacking_control` (GAMMA Mags Reloaded) and
+   resolves `SYS_GetParam` through its own chunk to `_G`, so these items stack
+   by section with no condition check. Three artefacts at 0.35/0.65/0.95 land in
+   one cell, and the picker is the only way to tell them apart.
+
+   The delegate is held in a file-local, saved and restored around the call the
+   same way the swap itself is, and skips itself if it finds our own shim
+   already installed, so a nested `Picker_Toggle` cannot leave a self-reference
+   behind. ilrathCXV's original chains through `_inv_SYS_GetParam` for the same
+   reason; our reimplementation kept the restore half of that pattern and
+   dropped the delegate half.
+
 10. Stacks not showing the best-condition item: Sota added
     `UICellItem:FindChildIdByBestCondition` plus promotion logic in `AddChild`
     (a better incoming item takes the top slot, demoting the old one) and
@@ -209,7 +263,7 @@ uses.
 | `gamedata/scripts/zzzz_loot_searching.script` | Patched copy of Looting Takes Time REDUX's script. Only `get_sort_info` changed, to scale-correct the precomputed corpse grid. |
 | `gamedata/scripts/zzz_aaa_meat_spoiling_tooltip_fix.script` | Re-adds ilrathCXV's `ui_item.build_desc_footer` spoiling-timer line at chunk load (the `zzz_` prefix loads it after `ui_item`/`meat_spoiling`), reading the live timer via `meat_spoiling.save_state`. No-ops if `meat_spoiling` isn't loaded. |
 | `gamedata/scripts/zzz_aaa_food_satiety_percent_fix.script` | Wraps `ish_item_stats.override_stats_table` at chunk load, after Sota's own wrapper, to set `eat_satiety` back to `magnitude=100` / `unit="st_perc"`. Only rewrites the kcal form, so it no-ops if another mod owns the entry. |
-| `gamedata/scripts/zzz_aaa_meat_stack_picker_fix.script` | Re-adds ilrathCXV's `Picker_Toggle` / `new_get_param` pair so meat and patch stacks expand in the picker. Skips itself if `meat_spoiling.new_get_param` exists, meaning ilrathCXV's copy won. |
+| `gamedata/scripts/zzz_aaa_meat_stack_picker_fix.script` | Re-adds ilrathCXV's `Picker_Toggle` / `new_get_param` pair so meat and patch stacks expand in the picker. Chains to the displaced `ui_inventory.SYS_GetParam` rather than the global, which is what keeps Artefacts Reinvention's picker working for artefacts, outfit attachments and mutant hides. Skips itself if `meat_spoiling.new_get_param` exists, meaning ilrathCXV's copy won. |
 | `gamedata/scripts/zzz_aaa_best_condition_stacking_fix.script` | Re-adds `FindChildIdByBestCondition`, the `AddChild` promotion, and `ResetToChild`. Skips itself if `UICellItem.FindChildIdByBestCondition` exists, meaning Sota's copy won. |
 | `gamedata/scripts/zzz_aaa_sortingplus_highlight_fix.script` | Re-adds SortingPlus' `UIInventory:Highlight` / `UnHighlight_All` / `UICellItem:Update` overrides. No marker exists to detect SortingPlus' copy, so all three are written to be safe if applied twice. |
 | `gamedata/scripts/zzz_aaa_weight_rounding_fix.script` | Wraps `utils_ui.get_stats_value` to record the current stat, and the unlocalized `utils_ui.stats_round_idp` to force 1 decimal place on the two carry-weight stats, both at `on_game_start`. Logs a one-time `! FIXHD\|` warning and no-ops if the unlocalizer didn't apply. |

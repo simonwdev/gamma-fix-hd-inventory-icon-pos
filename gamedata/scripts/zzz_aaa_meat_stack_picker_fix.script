@@ -22,6 +22,19 @@
       ui_inventory.SYS_GetParam therefore shadows the global for that one module
       and nothing else, and only for the duration of the call.
 
+      Delegation matters as much as the swap. Another mod may already own
+      ui_inventory.SYS_GetParam, and its answers have to survive our detour.
+      G.A.M.M.A. Artefacts Reinvention installs exactly such a shim at chunk
+      load (zz_item_artefact.script, gated on MCM enable_condition_bar, default
+      on): it reports use_condition as true for every degradable artefact kind,
+      which is what gives artefacts their condition bar and their picker. It
+      writes into ui_inventory and utils_ui only, never _G, so a shim of ours
+      that falls back to the global SYS_GetParam instead of to the displaced
+      function makes artefacts read use_condition = false for the duration of
+      Picker_Toggle. The bar still draws (utils_ui is untouched) but the stack
+      refuses to expand. v0.6.0 and v0.7.0 shipped the non-chaining version and
+      broke artefact stacks that way; the shim now chains.
+
     Credit for the original approach: ilrathCXV, via Utjan's "Tagged Patches".
 
     Deviations from ilrathCXV's version, both deliberate:
@@ -56,6 +69,12 @@ end
 
 local meats = meat_spoiling.meats
 
+-- Whatever ui_inventory.SYS_GetParam was when we displaced it. Held in an
+-- upvalue rather than closed over per call so the shim is allocated once; it is
+-- saved and restored around the call exactly like the swap itself, so a nested
+-- Picker_Toggle cannot leave the wrong delegate behind.
+local delegate = nil
+
 -- Report use_condition as true for meat and patches, delegate everything else.
 local function picker_get_param(typ, sec, param, def)
     if (param == "use_condition") and sec then
@@ -63,7 +82,7 @@ local function picker_get_param(typ, sec, param, def)
             return true
         end
     end
-    return SYS_GetParam(typ, sec, param, def)
+    return (delegate or SYS_GetParam)(typ, sec, param, def)
 end
 
 function on_game_start()
@@ -71,11 +90,32 @@ function on_game_start()
 
     ui_inventory.UIInventory.Picker_Toggle = function(self, bag, idx, update_mode, force_hide)
         local prev = ui_inventory.SYS_GetParam
+        local prev_delegate = delegate
+
+        -- Never chain to ourselves: if we are already installed (a nested call
+        -- got here first) keep pointing at the mod underneath us. Written long
+        -- rather than as `(prev ~= picker_get_param) and prev or prev_delegate`,
+        -- which collapses a nil prev to prev_delegate and so would resurrect an
+        -- override that intervening code had deliberately cleared.
+        if prev == picker_get_param then
+            delegate = prev_delegate
+        else
+            delegate = prev
+        end
         ui_inventory.SYS_GetParam = picker_get_param
 
-        local result = base_Picker_Toggle(self, bag, idx, update_mode, force_hide)
+        -- pcall so an error anywhere in the picker path cannot leave our shim
+        -- installed for the rest of the session; the file's containment claim
+        -- is only true if the restore is unconditional. The error is re-raised
+        -- unchanged, so this hides nothing.
+        local ok, result = pcall(base_Picker_Toggle, self, bag, idx, update_mode, force_hide)
 
         ui_inventory.SYS_GetParam = prev
+        delegate = prev_delegate
+
+        if not ok then
+            error(result, 0)
+        end
         return result
     end
 end
