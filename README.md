@@ -244,9 +244,14 @@ anyway.
     a column-0 file-scope local, which is all the `^local` rewrite can reach) and
     wrapped. Knowing which stat is being rounded takes a second wrapper on
     `get_stats_value`, which runs once at the top of each stat-loop iteration,
-    ahead of every rounding call in that iteration. Without modded exes the
-    unlocalizer is inert, `utils_ui.stats_round_idp` stays nil, and the script
-    logs one `! FIXHD|` line and no-ops.
+    ahead of every rounding call in that iteration. If
+    `utils_ui.stats_round_idp` is nil the script logs one `! FIXHD|` line and
+    no-ops. That line does not diagnose why, because Lua cannot: the unlocalizer
+    may be inert for want of modded exes, or it may have applied and captured
+    nil because the winning `ui_inventory` has no `stats_round_idp` (only Sota
+    defines it), or the winning `utils_ui.script` may be another mod's copy with
+    no such declaration. Assigning nil creates no table key, so all three look
+    identical from here.
 
 ## Files
 
@@ -266,7 +271,7 @@ uses.
 | `gamedata/scripts/zzz_aaa_meat_stack_picker_fix.script` | Re-adds ilrathCXV's `Picker_Toggle` / `new_get_param` pair so meat and patch stacks expand in the picker. Chains to the displaced `ui_inventory.SYS_GetParam` rather than the global, which is what keeps Artefacts Reinvention's picker working for artefacts, outfit attachments and mutant hides. Skips itself if `meat_spoiling.new_get_param` exists, meaning ilrathCXV's copy won. |
 | `gamedata/scripts/zzz_aaa_best_condition_stacking_fix.script` | Re-adds `FindChildIdByBestCondition`, the `AddChild` promotion, and `ResetToChild`. Skips itself if `UICellItem.FindChildIdByBestCondition` exists, meaning Sota's copy won. |
 | `gamedata/scripts/zzz_aaa_sortingplus_highlight_fix.script` | Re-adds SortingPlus' `UIInventory:Highlight` / `UnHighlight_All` / `UICellItem:Update` overrides. No marker exists to detect SortingPlus' copy, so all three are written to be safe if applied twice. |
-| `gamedata/scripts/zzz_aaa_weight_rounding_fix.script` | Wraps `utils_ui.get_stats_value` to record the current stat, and the unlocalized `utils_ui.stats_round_idp` to force 1 decimal place on the two carry-weight stats, both at `on_game_start`. Logs a one-time `! FIXHD\|` warning and no-ops if the unlocalizer didn't apply. |
+| `gamedata/scripts/zzz_aaa_weight_rounding_fix.script` | Wraps `utils_ui.get_stats_value` to record the current stat, and the unlocalized `utils_ui.stats_round_idp` to force 1 decimal place on the two carry-weight stats, both at `on_game_start`. Logs a one-time `! FIXHD\|` warning and no-ops if `utils_ui.stats_round_idp` is nil, without asserting which of the three possible causes it was. |
 | `gamedata/configs/unlocalizers/unlocalizer_fix_hd_stats_rounding.ltx` | Promotes `utils_ui`'s file-local `stats_round_idp` out of file scope for the fix above. Kept separate from the SortingPlus unlocalizer so that one stays byte-identical to mod 464's copy; sections merge across every file in the folder. Requires modded exes. |
 | `gamedata/configs/mod_system_zzzzzzzzzzzzzzzzzzzzzzzzzzz_fix_rpk74_hd_icon.ltx` | DLTX override deleting `wpn_rpk74`'s stale grid coordinates so it inherits the ones the icon pack sets on `wpn_rpk`. DLTX applies patches in filename order (`FS_FileSet` is sorted by name, `Xr_ini.cpp`), not MO2 order, so the long `z` run is what makes this land after the icon pack's `mod_system_zzzzzzzzzzzzzzz_s2rifles.ltx`. |
 | `gamedata/configs/unlocalizers/unlocalizer_fix_hd_icon_pos.ltx` | Exposes SortingPlus' local `favorite_itms`/`junk_itms`/`item_order` to our sort factory. Identical to (and safely additive with) the config mod 464 ships; needed because Inventory Antifreeze activates our `seax_*` script by filename even when 464 itself is disabled. |

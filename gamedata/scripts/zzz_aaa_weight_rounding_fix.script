@@ -48,8 +48,25 @@
       Sota's own code sets the same decimal place and our wrapper becomes a no-op
       rather than a conflict.
 
-    If the unlocalizer did not apply (no modded exes, or the config did not
-    load) then utils_ui.stats_round_idp is nil, and we log once and do nothing.
+    If utils_ui.stats_round_idp is nil we log once and do nothing. Do not read
+    that log line as proof the unlocalizer failed -- it has three causes and
+    nothing in Lua distinguishes them:
+
+      1. The unlocalizer did not apply (no modded exes, or the config did not
+         load), so the declaration is still a file-scope local.
+      2. It did apply, but line 41 assigned nil, because the ui_inventory that
+         won the load order has no stats_round_idp. Only Sota's UI Rework
+         defines it, so this is the normal state on a stack without Sota.
+         Assigning nil creates no table key, so the result is indistinguishable
+         from case 1.
+      3. The utils_ui.script that won is a different mod's copy with no such
+         declaration at all. MASG ships one, for instance, with no reference to
+         Sota's API anywhere in it.
+
+    An earlier version of this message asserted case 1 outright. A user's log
+    disproved it: 122 unlocalizers were created on that machine, ours among
+    them, so modded exes were plainly working and the real cause was case 2
+    or 3. Report what is observed, not a guess at why.
 --]]
 
 
@@ -69,10 +86,13 @@ function on_game_start()
         return
     end
 
-    -- Present only if the unlocalizer promoted it out of file scope.
+    -- Nil here has more than one cause and Lua cannot tell them apart, so report
+    -- the observation and list them rather than asserting one. See the header.
     if type(utils_ui.stats_round_idp) ~= "function" then
-        printf("! FIXHD| weight rounding fix inactive: utils_ui.stats_round_idp is not exposed "
-            .. "(unlocalizer_fix_hd_stats_rounding.ltx did not apply -- modded exes required)")
+        printf("! FIXHD| weight rounding fix inactive: utils_ui.stats_round_idp is nil. Either the "
+            .. "winning utils_ui.script declares no such local, or it captured nil because "
+            .. "ui_inventory has no stats_round_idp (only Sota's UI Rework defines it), or "
+            .. "unlocalizer_fix_hd_stats_rounding.ltx did not apply (needs modded exes).")
         return
     end
 
