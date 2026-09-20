@@ -1,0 +1,264 @@
+; Restores 31 weapon variants whose inventory icon renders as a cropped
+; fragment of an unrelated gun, or as an empty cell, in the inventory and in
+; the F7 debug spawner.
+;
+; Same fault as mod_system_..._fix_rpk74_hd_icon.ltx, found by auditing every
+; section in the merged system.ltx for the signature that produced it:
+;
+;   ini_sys:dltx_get_filename_of_line(sec, "icons_texture")
+;        ~= ini_sys:dltx_get_filename_of_line(sec, "inv_grid_x")
+;
+; MartinLore's Stalker 2 icons repoints a weapon family at one of its HD
+; atlases by patching only the family's parent section, e.g.
+;
+;   ![wpn_fal_aus]  icons_texture=ui\ui_stalker2_rifles  12x4 @ (0,12)  scale=2
+;
+; Scoped and kitted variants inherit icons_texture and inv_grid_scale from
+; that patched parent, but they redeclare inv_grid_x/y/width/height of their
+; own, and those are still the legacy ui_icon_bas / ui_icon_equipment
+; coordinates from the weapon's own config. MartinLore patches the variants
+; it knows about; the ones below it never names, so nothing corrects them.
+;
+; The engine then samples a legacy-sized window at legacy coordinates out of
+; a 4096x2048 HD atlas, and draws it in a ceil(w/scale) x ceil(h/scale) cell.
+; wpn_fal_aus_kit_aus_tri, for instance, reads 300x100 px at (450,600) -- the
+; muzzle half of the SA-58's own HD icon -- into a 3x1 cell instead of the
+; parent's 600x200 px at (0,600) in 6x2. Every section listed here was
+; checked by cropping the rect out of the atlas it actually resolves to:
+; all 31 are a crop of a neighbouring gun, a splice of two, or blank space.
+;
+; Fix, as with the RPK-74: delete the four stale coordinates so the
+; inheritance the override was silently breaking is restored. DLTX drops a
+; "!key" line in the base+mods merge (IsMergingBaseAndMod, Xr_ini.cpp), so
+; the parent's value survives the parent merge that follows.
+;
+; Deleting rather than reassigning, again for the same reason. None of these
+; sections declares icons_texture or inv_grid_scale of its own; both reach
+; them only by inheritance from MartinLore's patched parent. Writing HD
+; coordinates here would be wrong without the icon pack installed, and would
+; leak inv_grid_scale to anything inheriting further down the chain
+; (wpn_ak101_camo_1p29 et al. inherit wpn_ak101_camo, not wpn_ak101).
+;
+; With the icon pack installed each variant draws its parent's HD icon: the
+; right gun, at the right size, minus the scope that distinguished it. Every
+; parent listed was verified to render correctly. Without the pack they fall
+; back to the parent's legacy icon instead of their own -- a near-identical
+; gun, and nothing garbled. A DLTX patch cannot be conditioned on another
+; mod's presence, so that is the tradeoff.
+;
+; Filename sorts after every mod_system_*_s2*.ltx in the icon pack
+; (s2pistols carries the longest z-run, 18) so these deletions apply last.
+
+; ---- ui\ui_stalker2_rifles ------------------------------------------------
+
+; :wpn_ace52 -- 10x4 @ (12,16)
+![wpn_ace52_aim_low]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+![wpn_ace52_point_aimpro]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+![wpn_ace52_rakurs]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+; :wpn_adar2_15 -- 10x4 @ (12,20). The stale rects at (148..158,40) are blank.
+![wpn_adar2_15_mark8_rmr]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+![wpn_adar2_15_spec_alt]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+![wpn_adar2_15_triji]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+; :wpn_ak101 -- 10x4 @ (12,28). The _1p29/_kobra/_ps01 variants inherit
+; wpn_ak101_camo, so they reach the parent only once the camo is cleared.
+![wpn_ak101_camo]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+![wpn_ak101_camo_1p29]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+![wpn_ak101_camo_kobra]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+![wpn_ak101_camo_ps01]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+; :wpn_ak103 -- 10x4 @ (12,32)
+![wpn_ak103_camo]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+![wpn_ak103_camo_1p29]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+![wpn_ak103_camo_kobra]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+![wpn_ak103_camo_ps01]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+; :wpn_ak74_pmc -- 10x4 @ (22,24). The stale rect at (158,6) is blank.
+![wpn_ak74_pmc_trijicon_rmr]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+; :wpn_fal_aus -- 12x4 @ (0,12). "SA-58 AUS Scout / Defender / Marauder".
+![wpn_fal_aus_kit_aus_tri]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+![wpn_fal_aus_kit_fal_leup]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+![wpn_fal_aus_kit_sa5x_spec]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+; :wpn_m4_tac -- 10x4 @ (42,24). The stale rect at (158,4) is blank.
+![wpn_m4_tac_trijicon_rmr]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+; ---- ui\ui_stalker2_smgs --------------------------------------------------
+
+; :wpn_aug_freedom -- 10x4 @ (8,26)
+![wpn_aug_freedom_eot]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+; :wpn_kriss_vector -- 8x4 @ (0,14)
+![wpn_kriss_vector_rmr]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+; :wpn_ump45 -- 8x4 @ (18,12)
+![wpn_ump45_ac10632]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+![wpn_ump45_acog]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+![wpn_ump45_eot]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+; ---- ui\ui_stalker2_pistols -----------------------------------------------
+
+; :wpn_beretta -- 4x2 @ (12,2)
+![wpn_beretta_alt]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+; ---- ui\ui_stalker2_shotguns ----------------------------------------------
+
+; :wpn_raptr -- 10x4 @ (16,14). The stale rect at (0,4) is a break-action
+; hunting shotgun, i.e. a different gun entirely.
+![wpn_raptr_compm4s]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+; ---- ui\ui_stalker2_snipers -----------------------------------------------
+
+; :wpn_k98_mod -- 10x4 @ (0,18)
+![wpn_k98_mod_skeet]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+; :wpn_k98_mod_silen98 -- 12x4 @ (12,18). wpn_k98_mauser_kit_skeet inherits
+; wpn_k98_mod_silen98_skeet, so it reaches the parent through it.
+![wpn_k98_mod_silen98_skeet]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+![wpn_k98_mauser_kit_skeet]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+; :wpn_sks_tac -- 10x2 @ (52,14). The stale rects at (147,10..12) are blank.
+![wpn_sks_tac_kashtan_rmr]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y
+
+![wpn_sks_tac_pritseldob]
+!inv_grid_width
+!inv_grid_height
+!inv_grid_x
+!inv_grid_y

@@ -8,7 +8,7 @@ being drawn or placed wrong in the inventory:
 - **110- SortingPlus**: favourite/junk marks sit on the icon again; items taken or dropped while looting land on the right rows; its highlight bookkeeping is back
 - **Looting Takes Time REDUX**: corpse loot grids pack tightly again instead of leaving cell-wide gaps
 - **HD Attachment Icons For GAMMA**: scoped weapon variants the pack doesn't cover now draw its straight gun-mounted scope icons instead of the diagonal inventory item icon
-- **MartinLore's Stalker 2 icons**: the RPK-74 draws a gun again instead of a garbled crop of unrelated weapons, and the drum-mag RPK-16 is no longer squashed when the icon pack isn't installed
+- **MartinLore's Stalker 2 icons**: the RPK-74 draws a gun again instead of a garbled crop of unrelated weapons, and the drum-mag RPK-16 is no longer squashed when the icon pack isn't installed; 31 more scoped and kitted weapon variants the pack repoints but doesn't re-map - the SA-58 AUS kits, the camo AK-101/103s, the Trijicon M4/AK-74 PMC, the scoped UMPs and the rest - stop drawing a cropped fragment of a neighbouring gun or an empty cell
 - **ilrathCXV's Meat Spoiling Timer in Tooltips**: the "hours until rotten" line is back on raw and cooked meat; meat and patch stacks expand in the picker again, so you can take the freshest piece
 - **G.A.M.M.A. Artefacts Reinvention**: stacks of artefacts, junk artefacts, outfit attachments and mutant hides open in the picker again, so you can take a specific one instead of only the one on top (a self-inflicted regression, broken in v0.6.0)
 - **UI Rework G.A.M.M.A. Style - Sota**: food tooltips read satiety as a percentage instead of a raw kcal figure; a stack shows the best-condition item on top; carry-weight bonuses keep their decimal, so a 1.58 kg backpack stops reading as 2 kg
@@ -33,8 +33,8 @@ behaviour at runtime instead.
 Two other orderings get confused with MO2 priority. Script execution order is
 alphabetical by filename whatever the priority is, which is what the `zzz_aaa_`
 and `zzzz_` prefixes are for. DLTX also applies `mod_system_*` patches in
-filename order (`FS_FileSet` sorts by name, `Xr_ini.cpp`), which is why the
-RPK-74 config carries such a long `z` run.
+filename order (`FS_FileSet` sorts by name, `Xr_ini.cpp`), which is why the two
+icon configs carry such a long `z` run.
 
 ## The pattern behind most of these
 
@@ -253,6 +253,52 @@ anyway.
     no such declaration. Assigning nil creates no table key, so all three look
     identical from here.
 
+13. The same crop, on 31 more variants: the RPK-74 above is one instance of a
+    pattern, not a one-off. MartinLore's pack repoints a weapon family by
+    patching only the family's parent section, and every scoped or kitted
+    child that redeclares its own `inv_grid_x/y/width/height` keeps legacy
+    `ui_icon_bas` / `ui_icon_equipment` coordinates while inheriting the HD
+    `icons_texture` and `inv_grid_scale`. The pack re-maps the variants it
+    names and no others.
+
+    The signature is exact and enumerable, because the modded exe records the
+    source file of every merged line: a section is suspect when
+    `ini_sys:dltx_get_filename_of_line(sec, "icons_texture")` disagrees with
+    the same call for `inv_grid_x`. Over the 22,176 sections in this install's
+    merged `system.ltx` that flags 389 sections; discarding the ones with no
+    `inv_grid_scale` (magazines, the GROT family - consistent atlas, no HD
+    involvement) leaves the real ones. Each was confirmed by cropping the rect
+    out of the atlas it resolves to: all 31 weapons are a crop of a
+    neighbouring gun, a splice of two, or blank space.
+
+    - `ui_stalker2_rifles`: `wpn_ace52_aim_low`, `_point_aimpro`, `_rakurs`;
+      `wpn_adar2_15_mark8_rmr`, `_spec_alt`, `_triji`; `wpn_ak101_camo` and
+      its `_1p29`/`_kobra`/`_ps01`; `wpn_ak103_camo` and the same three;
+      `wpn_ak74_pmc_trijicon_rmr`; `wpn_fal_aus_kit_aus_tri`,
+      `_kit_fal_leup`, `_kit_sa5x_spec` (the "SA-58 AUS Scout / Marauder /
+      Defender"); `wpn_m4_tac_trijicon_rmr`
+    - `ui_stalker2_smgs`: `wpn_aug_freedom_eot`, `wpn_kriss_vector_rmr`,
+      `wpn_ump45_ac10632`, `_acog`, `_eot`
+    - `ui_stalker2_pistols`: `wpn_beretta_alt`
+    - `ui_stalker2_shotguns`: `wpn_raptr_compm4s`
+    - `ui_stalker2_snipers`: `wpn_k98_mod_skeet`, `wpn_k98_mod_silen98_skeet`,
+      `wpn_k98_mauser_kit_skeet`, `wpn_sks_tac_kashtan_rmr`, `_pritseldob`
+
+    Fix and tradeoff are item 7's, section for section: delete the four stale
+    coordinates, let the parent's survive the merge. Deleting rather than
+    assigning matters more here than it did for the RPK-74, because two of
+    these families chain - `wpn_ak101_camo_1p29` inherits `wpn_ak101_camo`,
+    `wpn_k98_mauser_kit_skeet` inherits `wpn_k98_mod_silen98_skeet` - so an
+    assigned `inv_grid_scale` would leak a level further down. Every parent
+    the deletions fall back to was checked to render correctly first.
+
+    Not fixed, because they are not weapons and the right owner is elsewhere:
+    the same audit flags the artefact-in-container sections
+    (`af_*_af_aac`/`_aam`/`_iam`, coordinates from `items_container_*.ltx`),
+    the `ammo_*_verybad` degraded-ammo variants, and `gl_test_shell*`. Those
+    all currently draw an empty cell.
+
+
 ## Files
 
 Three of these replace a file another mod ships, and have to win the MO2
@@ -274,6 +320,7 @@ uses.
 | `gamedata/scripts/zzz_aaa_weight_rounding_fix.script` | Wraps `utils_ui.get_stats_value` to record the current stat, and the unlocalized `utils_ui.stats_round_idp` to force 1 decimal place on the two carry-weight stats, both at `on_game_start`. Logs a one-time `! FIXHD\|` warning and no-ops if `utils_ui.stats_round_idp` is nil, without asserting which of the three possible causes it was. |
 | `gamedata/configs/unlocalizers/unlocalizer_fix_hd_stats_rounding.ltx` | Promotes `utils_ui`'s file-local `stats_round_idp` out of file scope for the fix above. Kept separate from the SortingPlus unlocalizer so that one stays byte-identical to mod 464's copy; sections merge across every file in the folder. Requires modded exes. |
 | `gamedata/configs/mod_system_zzzzzzzzzzzzzzzzzzzzzzzzzzz_fix_rpk74_hd_icon.ltx` | DLTX override deleting `wpn_rpk74`'s stale grid coordinates so it inherits the ones the icon pack sets on `wpn_rpk`. DLTX applies patches in filename order (`FS_FileSet` is sorted by name, `Xr_ini.cpp`), not MO2 order, so the long `z` run is what makes this land after the icon pack's `mod_system_zzzzzzzzzzzzzzz_s2rifles.ltx`. |
+| `gamedata/configs/mod_system_zzzzzzzzzzzzzzzzzzzzzzzzzzz_fix_s2_variant_hd_icons.ltx` | Same override for 31 other weapon variants the icon pack repoints through a parent section without re-mapping the child's own coordinates. Found by auditing every section in the merged `system.ltx` for `dltx_get_filename_of_line(sec, "icons_texture")` disagreeing with the same call for `inv_grid_x`. Needs the same long `z` run, and covers `_s2pistols` too, whose run is the longest of the pack's at 18. |
 | `gamedata/configs/unlocalizers/unlocalizer_fix_hd_icon_pos.ltx` | Exposes SortingPlus' local `favorite_itms`/`junk_itms`/`item_order` to our sort factory. Identical to (and safely additive with) the config mod 464 ships; needed because Inventory Antifreeze activates our `seax_*` script by filename even when 464 itself is disabled. |
 
 ## Install
