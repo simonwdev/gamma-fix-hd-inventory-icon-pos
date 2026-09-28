@@ -12,6 +12,7 @@ being drawn or placed wrong in the inventory:
 - **ilrathCXV's Meat Spoiling Timer in Tooltips**: the "hours until rotten" line is back on raw and cooked meat; meat and patch stacks expand in the picker again, so you can take the freshest piece
 - **G.A.M.M.A. Artefacts Reinvention**: stacks of artefacts, junk artefacts, outfit attachments and mutant hides open in the picker again, so you can take a specific one instead of only the one on top (a self-inflicted regression, broken in v0.6.0)
 - **UI Rework G.A.M.M.A. Style - Sota**: food tooltips read satiety as a percentage instead of a raw kcal figure; a stack shows the best-condition item on top; carry-weight bonuses keep their decimal, so a 1.58 kg backpack stops reading as 2 kg
+- **The Collector**: the magnifier and checkmark marks sit in the icon's top-right corner again instead of floating an icon-width to the right
 
 Each fix disables itself if its mod isn't installed.
 
@@ -298,6 +299,23 @@ anyway.
     the `ammo_*_verybad` degraded-ammo variants, and `gl_test_shell*`. Those
     all currently draw an empty cell.
 
+14. The Collector marks: that ModDB addon marks collectable items with a
+    magnifier, and collected ones with a checkmark, at `x = axis.w - 13` from
+    the unscaled axis. On HD icons that is twice the icon width, so the mark
+    floats past the right edge, often over a neighbouring item. Same bug and
+    same fix as item 3: the mark functor is wrapped to use the rendered
+    width, and The Collector still decides whether a mark shows.
+
+    The wrap happens at chunk load rather than `on_game_start`, because
+    `the_collector` registers its functor in its own `on_game_start` and
+    sorts before `zzz_aaa_*`. `axr_main` loads every script before calling
+    any `on_game_start`, so chunk load is always early enough.
+
+    The Collector also ships its own `rax_icon_layers.script`, an older copy
+    without the HD framework's scale correction for item-section layers. If
+    it outranks HD_Inventory_Icons_Framework it undoes that correction for
+    every mod, so install it below the framework or delete that file.
+
 
 ## Files
 
@@ -309,7 +327,7 @@ uses.
 | File | Role |
 |------|------|
 | `gamedata/scripts/seax_sortingplus_opt_sort_by_kind.script` | Replaces the copy from mod 464. Scale/override-aware footprints, SortingPlus cache priming, lazy caches, nil-guarded comparator. |
-| `gamedata/scripts/zzz_aaa_hd_icon_mark_pos_fix.script` | Wraps SortingPlus' `icon_junk`/`icon_favs` at `on_game_start` to correct mark positions. Named `zzz_aaa_*` so it wraps before SortingPlus registers the functors. |
+| `gamedata/scripts/zzz_aaa_hd_icon_mark_pos_fix.script` | Wraps SortingPlus' `icon_junk`/`icon_favs` at `on_game_start` to correct mark positions. Named `zzz_aaa_*` so it wraps before SortingPlus registers the functors. Also wraps The Collector's `icon_collectable` at chunk load, which is before any `on_game_start`. |
 | `gamedata/scripts/zzz_aaa_hd_attachment_layer_fix.script` | Replaces `UICellItem:Create_Layer` at `on_game_start` to redirect attachment overlays to the HD pack's gun-mounted `_x` icons. |
 | `gamedata/scripts/zzzz_loot_searching.script` | Patched copy of Looting Takes Time REDUX's script. Only `get_sort_info` changed, to scale-correct the precomputed corpse grid. |
 | `gamedata/scripts/zzz_aaa_meat_spoiling_tooltip_fix.script` | Re-adds ilrathCXV's `ui_item.build_desc_footer` spoiling-timer line at chunk load (the `zzz_` prefix loads it after `ui_item`/`meat_spoiling`), reading the live timer via `meat_spoiling.save_state`. No-ops if `meat_spoiling` isn't loaded. |

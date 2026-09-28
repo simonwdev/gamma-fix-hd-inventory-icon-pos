@@ -64,6 +64,35 @@ local function rendered_dims(sec)
     return w, h
 end
 
+-- The Collector (ModDB addon) marks collectable items with a magnifier, or a
+-- checkmark once collected, at x = axis.w - 13 from the unscaled axis, so on
+-- HD icons the mark floats one icon-width right of the item. It registers
+-- icon_collectable with rax_icon_layers in its on_game_start, and that list is
+-- append-only and private, so the wrap has to land before that call. axr_main
+-- loads every script before running any on_game_start, so wrapping here at
+-- chunk load wins regardless of script name. Keeps its show/hide logic.
+local function wrap_collector()
+    local tc = the_collector
+    if not (tc and type(tc.icon_collectable) == "function") or tc.__fixhd_wrapped then return end
+
+    local orig = tc.icon_collectable
+    tc.icon_collectable = function(cell, obj, sec)
+        local tbl = orig(cell, obj, sec)
+        if tbl and sec then
+            local w = rendered_dims(SYS_GetParam(0, sec, "parent_section", sec) or sec)
+            if w then
+                tbl.x = math.max(0, w - 13)
+            end
+            if DBG then
+                printf("FIXHD| mark collector [%s] x=%s y=%s rendered_w=%s", sec, tbl.x, tbl.y, tostring(w))
+            end
+        end
+        return tbl
+    end
+    tc.__fixhd_wrapped = true
+end
+wrap_collector()
+
 -- Diagnostic (DBG only): log the area every class-level FindFreeCell call
 -- actually claims, no matter which mod's implementation answers it.
 local ffc_logged = false
